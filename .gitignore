@@ -1,0 +1,79 @@
+# ==============================
+# Laravel Core
+# ==============================
+/vendor/
+/node_modules/
+/public/build
+/public/hot
+/public/storage
+/storage/*.key
+/storage/app/public
+/storage/framework/cache/*
+/storage/framework/sessions/*
+/storage/framework/views/*
+/storage/logs/*
+
+# ==============================
+# Environment Files (IMPORTANT)
+# ==============================
+.env
+.env.*
+!.env.example
+
+# ==============================
+# Composer & PHP
+# ==============================
+/composer.lock
+/auth.json
+.phpunit.result.cache
+.phpactor.json
+/.phpunit.cache
+
+# ==============================
+# IDE / Editors
+# ==============================
+/.vscode/
+/.idea/
+/.fleet/
+/.zed/
+
+# ==============================
+# OS Files
+# ==============================
+.DS_Store
+Thumbs.db
+
+# ==============================
+# Logs
+# ==============================
+*.log
+
+# ==============================
+# Laravel Testing
+# ==============================
+/coverage
+
+# ==============================
+# Laravel Mix / Vite
+# ==============================
+/public/mix-manifest.json
+/public/build
+
+# ==============================
+# Homestead / Valet
+# ==============================
+Homestead.json
+Homestead.yaml
+
+# ==============================
+# Cache / Temp
+# ==============================
+/bootstrap/cache/*.php
+!/bootstrap/cache/.gitignore
+
+# ==============================
+# Misc
+# ==============================
+npm-debug.log
+yarn-error.log
+pnpm-debug.log
