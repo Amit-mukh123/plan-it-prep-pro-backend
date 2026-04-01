@@ -38,7 +38,7 @@ Route::prefix('v1')->group(function () {
     });
 
     // ==============================
-    // PROTECTED ROUTES (Need Token)
+    // PROTECTED ROUTES (Need Token For Access)
     // ==============================
     Route::middleware('auth:sanctum')->group(function () {
 
