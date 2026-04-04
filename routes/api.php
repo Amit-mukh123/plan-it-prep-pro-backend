@@ -3,6 +3,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\UserConfigController;
+use App\Http\Controllers\Api\UserProfileController;
 
 Route::get('/db-test', function () {
     try {
@@ -51,6 +53,12 @@ Route::prefix('v1')->group(function () {
 
         // Example:
         Route::post('/logout', [AuthController::class, 'logout']);
+
+        Route::post('/user-config-store', [UserConfigController::class, 'store']);
+
+        Route::get('/user-config-show', [UserConfigController::class, 'show']);
+
+        Route::post('/user-profile-store', [UserProfileController::class, 'store']);
 
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);
