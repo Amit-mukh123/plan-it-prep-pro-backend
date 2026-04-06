@@ -3,6 +3,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\UserConfigController;
 use App\Http\Controllers\Api\UserProfileController;
 
@@ -59,6 +60,10 @@ Route::prefix('v1')->group(function () {
         Route::get('/user-config-show', [UserConfigController::class, 'show']);
 
         Route::post('/user-profile-store', [UserProfileController::class, 'store']);
+
+        Route::post('/chat/generate-meal-plan', [ChatController::class, 'generateMealPlan']);
+
+        Route::get('/chat/meal-plan', [ChatController::class, 'showMealPlan']);
 
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);
