@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\UserConfigController;
 use App\Http\Controllers\Api\UserProfileController;
+use App\Http\Controllers\Api\BatchMealController;
 
 Route::get('/db-test', function () {
     try {
@@ -32,7 +33,7 @@ Route::prefix('v1')->group(function () {
         Route::post('send-otp', 'sendOtp');
         Route::post('verify-otp', 'verifyOtp');
 
-        Route::post('register-email', 'registerEmail');
+        Route::post('register', 'registerEmail');
         Route::post('login-email', 'loginEmail');
 
         Route::post('google-login', 'googleLogin');
@@ -64,6 +65,8 @@ Route::prefix('v1')->group(function () {
         Route::post('/chat/generate-meal-plan', [ChatController::class, 'generateMealPlan']);
 
         Route::get('/chat/meal-plan', [ChatController::class, 'showMealPlan']);
+
+        Route::post('/batch-meal-plan', [BatchMealController::class, 'generateBatchMeal']);
 
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);

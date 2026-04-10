@@ -30,9 +30,14 @@ class AuthController extends Controller
 
         $phone = $request->phone_number;
 
-        $user = User::firstOrCreate([
-            'phone_number' => $phone
-        ]);
+        $user = User::where('phone_number', $phone)->first();
+
+        if(!$user){
+            return response()->json([
+            'status'=>false,
+            'msg'=>'User Not Registered'// remove in production
+        ],404);
+        }
 
          \Log::info('User ID:', ['id' => $user->id, 'type' => gettype($user->id)]);
 
