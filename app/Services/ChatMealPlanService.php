@@ -24,6 +24,7 @@ class ChatMealPlanService
      */
     public function generateAndSave(User $user, ?string $date = null, bool $refresh = false): array
     {
+        set_time_limit(300); 
         if (!Schema::hasTable('daily_diet_plans')) {
             return [
                 'status' => false,
@@ -101,6 +102,11 @@ class ChatMealPlanService
                 ],
                 'response_format' => ['type' => 'json_object'],
             ]);
+
+        \Log::info('OpenAI Response:', [
+    'status' => $response->status(),
+    'body' => $response->body(),
+]);
 
         if (!$response->successful()) {
             return [

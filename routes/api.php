@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\UserConfigController;
 use App\Http\Controllers\Api\UserProfileController;
 use App\Http\Controllers\Api\BatchMealController;
+use App\Http\Controllers\Api\UserSummaryController;
 
 Route::get('/db-test', function () {
     try {
@@ -67,6 +68,8 @@ Route::prefix('v1')->group(function () {
         Route::get('/chat/meal-plan', [ChatController::class, 'showMealPlan']);
 
         Route::post('/batch-meal-plan', [BatchMealController::class, 'generateBatchMeal']);
+
+        Route::get('/get-user-summary', [UserSummaryController::class, 'getSummary']);
 
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);
