@@ -3,8 +3,8 @@ FROM php:8.2-apache
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    git curl unzip zip libpq-dev libzip-dev \
-    && docker-php-ext-install pdo pdo_pgsql pgsql zip
+    git curl unzip zip libpq-dev libzip-dev libonig-dev \
+    && docker-php-ext-install pdo pdo_pgsql pgsql zip mbstring bcmath
 
 # Enable Apache mod_rewrite
 RUN a2enmod rewrite
