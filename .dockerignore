@@ -1,0 +1,32 @@
+# Ignore unnecessary files
+.git
+.gitignore
+node_modules
+vendor
+
+# Env files (important for security)
+.env
+.env.*
+!.env.example
+
+# Logs & cache
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Testing
+tests
+phpunit.xml
+
+# Build tools
+vite.config.js
+package.json
+package-lock.json
+
+# Editor configs
+.editorconfig
