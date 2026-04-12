@@ -41,7 +41,6 @@ class UserSummaryController extends Controller
             $greeting = $greetingText . ", " . $name . "! 🌿";
 
             // ─── DEFAULT VALUES (TEMPORARY) ─────────────
-            // Later you will replace with real tables
             $caloriesDone = 0;
             $caloriesTotal = 2000;
 
@@ -49,13 +48,13 @@ class UserSummaryController extends Controller
                 $caloriesTotal = (int) $config->data['daily_calories'];
             }
 
-            // Dummy values for now (future tables needed)
+            // Dummy values for now
             $water = "0.0 L";
             $steps = "0";
             $protein = "0g";
             $mealsDone = "0 / 4";
 
-            // Progress calculation (safe)
+            // Progress calculation
             $progress = $caloriesTotal > 0
                 ? round($caloriesDone / $caloriesTotal, 2)
                 : 0;
@@ -72,12 +71,24 @@ class UserSummaryController extends Controller
                     "steps" => $steps,
                     "protein" => $protein,
                     "mealsDone" => $mealsDone,
-                    "progress" => $progress
+                    "progress" => $progress,
+                    
+                    // Specific Profile Data
+                    "name" => $name,
+                    "age" => $profile->age ?? null,
+                    "gender" => $profile->gender ?? null,
+                    "height" => $profile->height_cm ?? null,
+                    "weight" => $profile->weight_kg ?? null,
+                    "target_weight" => $profile->target_weight_kg ?? null,
+                    "dietType" => $profile->diet_preference ?? null,
+                    "avatar" => $profile->avatar_url ?? null,
+                    
+                    // Config Data
+                    "config" => $config->data ?? []
                 ]
             ], 200);
 
         } catch (\Exception $e) {
-
             return response()->json([
                 'status' => false,
                 'message' => 'Failed to fetch summary',
