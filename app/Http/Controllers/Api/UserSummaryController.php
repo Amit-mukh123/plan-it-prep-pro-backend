@@ -42,11 +42,12 @@ class UserSummaryController extends Controller
 
             // ─── DEFAULT VALUES (TEMPORARY) ─────────────
             $caloriesDone = 0;
-            $caloriesTotal = 2000;
-
-            if ($config && isset($config->data['daily_calories'])) {
-                $caloriesTotal = (int) $config->data['daily_calories'];
-            }
+            // Accessing the CORRECT nested key from your JSON
+        $targetCalorieString = $config->data['answers']['target_calorie'] ?? '2000';
+        
+        // Extract digits (1500) from the string ("1500 kcal...")
+        preg_match('/\d+/', $targetCalorieString, $matches);
+        $caloriesTotal = isset($matches[0]) ? (int)$matches[0] : 2000;
 
             // Dummy values for now
             $water = "0.0 L";
