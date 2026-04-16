@@ -22,7 +22,13 @@ class ChatMealPlanService
      * - refresh = 1 and active data exists => deactivate old, generate new, save new active row
      * - no active data => generate and save
      */
-    public function generateAndSave(User $user, ?string $date = null, bool $refresh = false): array
+    public function generateAndSave(
+        User $user,
+        ?string $date = null,
+        bool $refresh = false,
+        bool $isIngredientMode = false,
+        array $providedIngredients = []
+    ): array
     {
         set_time_limit(300); 
         if (!Schema::hasTable('daily_diet_plans')) {
@@ -73,8 +79,25 @@ class ChatMealPlanService
             ];
         }
 
-        $promptPayload = $this->buildPromptPayload($user, $profile, $config, $planDate);
-        $systemPrompt = $this->buildSystemPrompt();
+        $normalizedProvidedIngredients = $this->normalizeProvidedIngredients($providedIngredients);
+
+        if ($isIngredientMode && count($normalizedProvidedIngredients) === 0) {
+            return [
+                'status' => false,
+                'message' => 'Ingredient mode is enabled, but no valid ingredients were provided.',
+                'code' => 422,
+            ];
+        }
+
+        $promptPayload = $this->buildPromptPayload(
+            $user,
+            $profile,
+            $config,
+            $planDate,
+            $isIngredientMode,
+            $normalizedProvidedIngredients
+        );
+        $systemPrompt = $this->buildSystemPrompt($isIngredientMode);
 
         $apiKey = (string) config('app.chat_gpt_api_key');
         if ($apiKey === '') {
@@ -161,6 +184,8 @@ class ChatMealPlanService
                 'meta' => [
                     'profile_snapshot' => $profile->toArray(),
                     'user_config_snapshot' => $config->toArray(),
+                    'ingredient_mode' => $isIngredientMode,
+                    'provided_ingredients' => $normalizedProvidedIngredients,
                     'ai_prompt' => $systemPrompt,
                     'ai_model' => $model,
                     'raw_ai_response' => $decoded,
@@ -299,10 +324,21 @@ class ChatMealPlanService
     /**
      * Build a compact payload used in prompt generation.
      */
-    private function buildPromptPayload(User $user, UserProfile $profile, UserConfig $config, string $planDate): array
+    private function buildPromptPayload(
+        User $user,
+        UserProfile $profile,
+        UserConfig $config,
+        string $planDate,
+        bool $isIngredientMode,
+        array $providedIngredients
+    ): array
     {
         return [
             'date' => $planDate,
+            'ingredient_context' => [
+                'isIngredientMode' => $isIngredientMode,
+                'providedIngredients' => $providedIngredients,
+            ],
             'user' => [
                 'id' => $user->id,
                 'email' => $user->email,
@@ -324,8 +360,32 @@ class ChatMealPlanService
     /**
      * System prompt with strict response schema.
      */
-    private function buildSystemPrompt(): string
+    private function buildSystemPrompt(bool $isIngredientMode = false): string
     {
+        if ($isIngredientMode) {
+            return <<<PROMPT
+Generate a practical 1-day meal plan from profile + config + provided ingredients.
+
+You MUST prioritize the provided ingredients and suggest meals that can be made using them.
+Also identify additional missing ingredients needed to complete cooking.
+
+Must follow user allergies, diet, preferences, calorie target, meal count, prep style, appliances, and cooking time. Allergy safety has highest priority.
+
+Output JSON only (no markdown/text) with exactly these top keys:
+1) meals: array of meal objects with keys
+id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags (array of strings), ingredients (array of strings), steps (array of strings).
+2) groceryRequirements: array of objects with keys item, quantity, category.
+
+Requirements:
+- Include at least Breakfast, Lunch, Dinner.
+- Meals should clearly reflect usage of provided ingredients when possible.
+- groceryRequirements must contain additional/missing ingredients needed to cook the selected meals.
+- Do not include ingredients that are already sufficiently available in provided ingredients.
+- Use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).
+- Keep meals realistic for home cooking and nutritionally aligned to goal.
+PROMPT;
+        }
+
         return <<<PROMPT
 Generate a practical 1-day meal plan from profile + config.
 
@@ -333,7 +393,7 @@ Must follow user allergies, diet, preferences, calorie target, meal count, prep 
 
 Output JSON only (no markdown/text) with exactly these top keys:
 1) meals: array of meal objects with keys
-id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags, ingredients, steps.
+id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags (array of strings), ingredients (array of strings), steps (array of strings).
 2) groceryRequirements: array of objects with keys item, quantity, category.
 
 Requirements:
@@ -342,6 +402,87 @@ Requirements:
 - groceryRequirements must be consolidated for the day, include oils/spices/sauces, merge duplicates, and use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).
 - Keep meals realistic for home cooking and nutritionally aligned to goal.
 PROMPT;
+    }
+
+    /**
+     * Normalize provided ingredient payload into a clean list of ingredient names.
+     *
+     * Supports:
+     * - ["egg", "tomato"]
+     * - [{"name":"egg"}, {"item":"tomato"}]
+     * - {"egg": true, "tomato": false, "onion": true}
+     */
+    private function normalizeProvidedIngredients(array $providedIngredients): array
+    {
+        $result = [];
+
+        if (array_is_list($providedIngredients)) {
+            foreach ($providedIngredients as $entry) {
+                if (is_string($entry)) {
+                    $value = trim($entry);
+                    if ($value !== '') {
+                        $result[] = $value;
+                    }
+                    continue;
+                }
+
+                if (is_array($entry)) {
+                    $available = $entry['available'] ?? $entry['is_available'] ?? $entry['selected'] ?? true;
+                    if ($available === false || $available === 0 || $available === '0') {
+                        continue;
+                    }
+
+                    $name = trim((string) ($entry['name'] ?? $entry['item'] ?? $entry['ingredient'] ?? ''));
+                    if ($name !== '') {
+                        $result[] = $name;
+                    }
+                }
+            }
+        } else {
+            foreach ($providedIngredients as $key => $value) {
+                if (!is_string($key) || trim($key) === '') {
+                    continue;
+                }
+
+                if (is_bool($value)) {
+                    if ($value) {
+                        $result[] = trim($key);
+                    }
+                    continue;
+                }
+
+                if (is_numeric($value)) {
+                    if ((int) $value === 1) {
+                        $result[] = trim($key);
+                    }
+                    continue;
+                }
+
+                if (is_string($value)) {
+                    $truthy = in_array(strtolower(trim($value)), ['1', 'true', 'yes', 'y'], true);
+                    if ($truthy) {
+                        $result[] = trim($key);
+                    }
+                }
+            }
+        }
+
+        $unique = [];
+        $seen = [];
+        foreach ($result as $item) {
+            $clean = trim($item);
+            if ($clean === '') {
+                continue;
+            }
+
+            $k = mb_strtolower($clean);
+            if (!isset($seen[$k])) {
+                $seen[$k] = true;
+                $unique[] = $clean;
+            }
+        }
+
+        return $unique;
     }
 
     /**
@@ -377,9 +518,19 @@ PROMPT;
                 'carbs' => (string) ($meal['carbs'] ?? '0g'),
                 'fat' => (string) ($meal['fat'] ?? '0g'),
                 'prepTime' => (string) ($meal['prepTime'] ?? '0 min'),
-                'tags' => array_values(array_filter($meal['tags'] ?? [], fn ($v) => is_string($v) && $v !== '')),
-                'ingredients' => array_values(array_filter($meal['ingredients'] ?? [], fn ($v) => is_string($v) && $v !== '')),
-                'steps' => array_values(array_filter($meal['steps'] ?? [], fn ($v) => is_string($v) && $v !== '')),
+                'tags' => array_values(array_filter(array_map(function ($v) {
+                    return is_string($v) ? $v : '';
+                }, $meal['tags'] ?? []), fn ($v) => $v !== '')),
+                'ingredients' => array_values(array_filter(array_map(function ($v) {
+                    if (is_string($v)) return $v;
+                    if (is_array($v)) return trim(($v['name'] ?? $v['item'] ?? '') . ' ' . ($v['amount'] ?? $v['quantity'] ?? ''));
+                    return '';
+                }, $meal['ingredients'] ?? []), fn ($v) => $v !== '')),
+                'steps' => array_values(array_filter(array_map(function ($v) {
+                    if (is_string($v)) return $v;
+                    if (is_array($v)) return (string) ($v['step'] ?? $v['text'] ?? $v['description'] ?? '');
+                    return '';
+                }, $meal['steps'] ?? []), fn ($v) => $v !== '')),
             ];
 
             $index++;
