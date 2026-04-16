@@ -21,14 +21,27 @@ class ChatController extends Controller
         $validated = $request->validate([
             'date' => 'nullable|date',
             'refresh' => 'nullable|boolean',
+            'isIngredients' => 'nullable|boolean',
+            'ingredients' => 'nullable|array',
+            'ingridients' => 'nullable|array',
         ]);
 
         $user = auth()->user();
 
+        $isIngredientMode = (bool) (
+            $validated['idingridients']
+            ?? $validated['isIngredient']
+            ?? false
+        );
+
+        $providedIngredients = $validated['ingredients'] ?? $validated['ingridients'] ?? [];
+
         $result = $this->mealPlanService->generateAndSave(
             $user,
             $validated['date'] ?? null,
-            (bool) ($validated['refresh'] ?? false)
+            (bool) ($validated['refresh'] ?? false),
+            $isIngredientMode,
+            is_array($providedIngredients) ? $providedIngredients : []
         );
 
         return response()->json(
