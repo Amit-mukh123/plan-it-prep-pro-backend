@@ -27,7 +27,8 @@ class ChatMealPlanService
         ?string $date = null,
         bool $refresh = false,
         bool $isIngredientMode = false,
-        array $providedIngredients = []
+        array $providedIngredients = [],
+        array $locationContext = []
     ): array
     {
         set_time_limit(300); 
@@ -95,7 +96,8 @@ class ChatMealPlanService
             $config,
             $planDate,
             $isIngredientMode,
-            $normalizedProvidedIngredients
+            $normalizedProvidedIngredients,
+            $locationContext
         );
         $systemPrompt = $this->buildSystemPrompt($isIngredientMode);
 
@@ -184,6 +186,7 @@ class ChatMealPlanService
                 'meta' => [
                     'profile_snapshot' => $profile->toArray(),
                     'user_config_snapshot' => $config->toArray(),
+                    'location_context' => $promptPayload['location_context'] ?? null,
                     'ingredient_mode' => $isIngredientMode,
                     'provided_ingredients' => $normalizedProvidedIngredients,
                     'ai_prompt' => $systemPrompt,
@@ -330,14 +333,61 @@ class ChatMealPlanService
         UserConfig $config,
         string $planDate,
         bool $isIngredientMode,
-        array $providedIngredients
+        array $providedIngredients,
+        array $locationContext
     ): array
     {
+        $configData = is_array($config->data ?? null) ? $config->data : [];
+        $configLocation = is_array($configData['location'] ?? null) ? $configData['location'] : [];
+
+        $country = $locationContext['country'] ?? $configLocation['country'] ?? ($configData['country'] ?? null);
+        $state = $locationContext['state'] ?? $configLocation['state'] ?? ($configData['state'] ?? null);
+        $city = $locationContext['city'] ?? $configLocation['city'] ?? ($configData['city'] ?? null);
+
+        $country = isset($country) ? trim((string) $country) : null;
+        $state = isset($state) ? trim((string) $state) : null;
+        $city = isset($city) ? trim((string) $city) : null;
+
+        $country = $country !== '' ? $country : null;
+        $state = $state !== '' ? $state : null;
+        $city = $city !== '' ? $city : null;
+
+        $permission = $locationContext['permission']
+            ?? ($configLocation['permission'] ?? 'unknown');
+
+        $source = $locationContext['source']
+            ?? ($configLocation['source'] ?? 'database');
+
+        $latitude = $locationContext['latitude'] ?? ($configLocation['latitude'] ?? null);
+        $longitude = $locationContext['longitude'] ?? ($configLocation['longitude'] ?? null);
+
         return [
             'date' => $planDate,
             'ingredient_context' => [
                 'isIngredientMode' => $isIngredientMode,
                 'providedIngredients' => $providedIngredients,
+            ],
+            'location_context' => [
+                'permission' => $permission,
+                'source' => $source,
+                'country' => $country,
+                'state' => $state,
+                'city' => $city,
+                'latitude' => $latitude,
+                'longitude' => $longitude,
+                'suggestion_guidance' => [
+                    'if_country_selected_then_suggest_only_that_country_states' => true,
+                    'if_state_selected_then_suggest_only_that_state_cities' => true,
+                    'india_example' => [
+                        'country' => 'India',
+                        'states_only_from_india' => true,
+                    ],
+                ],
+                'fallback_guidance' => [
+                    'prefer_current_location_when_permission_granted' => true,
+                    'if_no_location_permission_use_user_selected_country_state_city' => true,
+                    'if_missing_location_use_config_or_neutral_regional_assumptions' => true,
+                ],
             ],
             'user' => [
                 'id' => $user->id,
@@ -366,6 +416,15 @@ class ChatMealPlanService
             return <<<PROMPT
 Generate a practical 1-day meal plan from profile + config + provided ingredients.
 
+Location rules:
+- Use `location_context` to localize cuisine, ingredient availability, and meal style.
+- If `location_context.permission = granted` and GPS/location fields are present, prioritize that location.
+- If permission is denied/unavailable, use user-provided country/state/city from `location_context`.
+- Apply suggestion logic semantics from payload:
+    - If country is selected (e.g., India), state suggestions should only belong to that country.
+    - If state is selected, city suggestions should only belong to that state.
+- If location is incomplete, fall back to config/profile and keep meals broadly regional-safe.
+
 You MUST prioritize the provided ingredients and suggest meals that can be made using them.
 Also identify additional missing ingredients needed to complete cooking.
 
@@ -388,6 +447,15 @@ PROMPT;
 
         return <<<PROMPT
 Generate a practical 1-day meal plan from profile + config.
+
+Location rules:
+- Use `location_context` to localize cuisine, ingredient availability, and meal style.
+- If `location_context.permission = granted` and GPS/location fields are present, prioritize that location.
+- If permission is denied/unavailable, use user-provided country/state/city from `location_context`.
+- Apply suggestion logic semantics from payload:
+    - If country is selected (e.g., India), state suggestions should only belong to that country.
+    - If state is selected, city suggestions should only belong to that state.
+- If location is incomplete, fall back to config/profile and keep meals broadly regional-safe.
 
 Must follow user allergies, diet, preferences, calorie target, meal count, prep style, appliances, and cooking time. Allergy safety has highest priority.
 

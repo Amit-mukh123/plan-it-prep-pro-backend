@@ -9,10 +9,12 @@ class OtpVerification extends Model
     protected $table = 'otp_verifications';
 
     protected $fillable = [
-        'user_id',
-        'otp_code',
-        'expires_at',
-        'is_used'
+    'user_id',
+    'otp_code',
+    'channel',
+    'expires_at',
+    'is_used',
+    'attempt_count'
     ];
 
     protected $keyType = 'string';

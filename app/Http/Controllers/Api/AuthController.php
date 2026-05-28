@@ -1,109 +1,121 @@
 <?php
 
-namespace App\Http\Controllers\Api;
-
-use App\Http\Controllers\Controller;
-use App\Models\User;
-use App\Models\OtpVerification;
-use App\Models\UserSession;
-use App\Models\LoginAttempt;
-use Carbon\Carbon;
+namespace App\Http\Controllers;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Str;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Log;
-
+use App\Models\User;
+use App\Services\OtpService;
+use App\Services\SmsService;
+use App\Mail\OtpMail;
 class AuthController extends Controller
 {
     // ==============================
-    // 1. SEND OTP (PHONE LOGIN)
+    // 1. SEND OTP
     // ==============================
-    public function sendOtp(Request $request)
+    public function sendOtp(Request $request, OtpService $otpService, SmsService $smsService)
     {
         $validator = Validator::make($request->all(), [
             'phone_number' => 'required|string'
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
+            return response()->json([
+                'status' => false,
+                'errors' => $validator->errors()
+            ], 422);
         }
 
         try {
             $user = User::where('phone_number', $request->phone_number)->first();
 
             if (!$user) {
-                return response()->json(['status' => false, 'msg' => 'User Not Registered'], 404);
+                return response()->json([
+                    'status' => false,
+                    'msg' => 'Account not found.'
+                ], 404);
             }
 
-            DB::transaction(function () use ($user) {
-                // Delete old OTPs for this user
-                OtpVerification::where('user_id', $user->id)->delete();
+            // Generate OTP
+            $otp = $otpService->generateOtp($user, 'sms');
 
-                $otp = 123456; // TODO: Replace with dynamic generator in production
+            // Send SMS
+            $smsService->send($user->phone_number, $otp);
 
-                OtpVerification::create([
-                    'user_id'    => $user->id,
-                    'otp_code'   => $otp,
-                    'expires_at' => Carbon::now()->addMinutes(5)
-                ]);
-            });
+            // Send Email (optional)
+            if ($user->email) {
+                Mail::to($user->email)->send(new OtpMail($otp));
+            }
 
             return response()->json([
                 'status' => true,
-                'msg'    => 'OTP sent successfully',
-                'otp'    => 123456 // TODO: Remove this line in production
+                'msg' => 'OTP sent successfully'
             ], 200);
 
         } catch (\Exception $e) {
             Log::error('OTP Send Error: ' . $e->getMessage());
-            return response()->json(['status' => false, 'msg' => 'Server Error. Please try again later.'], 500);
+
+            return response()->json([
+                'status' => false,
+                'msg' => 'Server Error. Please try again later.'
+            ], 500);
         }
     }
 
     // ==============================
     // 2. VERIFY OTP
     // ==============================
-    public function verifyOtp(Request $request)
+    public function verifyOtp(Request $request, OtpService $otpService)
     {
         $validator = Validator::make($request->all(), [
-            'phone_number' => 'required',
-            'otp'          => 'required'
+            'phone_number' => 'required|string',
+            'otp' => 'required|string'
         ]);
 
         if ($validator->fails()) {
-            return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
+            return response()->json([
+                'status' => false,
+                'errors' => $validator->errors()
+            ], 422);
         }
 
-        $user = User::where('phone_number', $request->phone_number)->first();
+        try {
+            $user = User::where('phone_number', $request->phone_number)->first();
 
-        if (!$user) {
-            return response()->json(['status' => false, 'msg' => 'User not found'], 404);
-        }
+            if (!$user) {
+                return response()->json([
+                    'status' => false,
+                    'msg' => 'User not found'
+                ], 404);
+            }
 
-        $otpRecord = OtpVerification::where('user_id', $user->id)
-            ->where('otp_code', $request->otp)
-            ->first();
+            $result = $otpService->verifyOtp($user, $request->otp);
 
-        if (!$otpRecord) {
-            $this->logAttempt($request, $user->id, false, 'invalid_otp');
-            return response()->json(['status' => false, 'msg' => 'Invalid OTP'], 401);
-        }
+            if (!$result['status']) {
+                return response()->json([
+                    'status' => false,
+                    'msg' => $result['msg']
+                ], 401);
+            }
 
-        if (Carbon::parse($otpRecord->expires_at)->isPast()) {
-            return response()->json(['status' => false, 'msg' => 'OTP expired'], 401);
-        }
-
-        return DB::transaction(function () use ($user, $otpRecord, $request) {
-            $otpRecord->update(['is_used' => true]);
+            // Update user login info
             $user->update([
-                'is_verified'   => true,
+                'is_verified' => true,
                 'last_login_at' => now()
             ]);
 
+            // Generate session (your existing method)
             return $this->generateSession($user, $request);
-        });
+
+        } catch (\Exception $e) {
+            Log::error('OTP Verify Error: ' . $e->getMessage());
+
+            return response()->json([
+                'status' => false,
+                'msg' => 'Server Error'
+            ], 500);
+        }
     }
 
     // ==============================
@@ -206,11 +218,12 @@ class AuthController extends Controller
     private function generateSession($user, $request)
     {
         try {
-            return DB::transaction(function () use ($user, $request) {
+            $response = DB::transaction(function () use ($user, $request) {
                 // Deactivate old sessions if your logic requires single-device login
                 // UserSession::where('user_id', $user->id)->update(['is_active' => false]);
 
                 $accessToken = $user->createToken('access_token')->plainTextToken;
+
                 $refreshToken = hash('sha256', Str::random(60));
 
                 UserSession::create([
@@ -222,8 +235,6 @@ class AuthController extends Controller
                     'is_active'     => true
                 ]);
 
-                $this->logAttempt($request, $user->id, true, null);
-
                 return response()->json([
                     'status'        => true,
                     'access_token'  => $accessToken,
@@ -231,6 +242,13 @@ class AuthController extends Controller
                     'user'          => $user
                 ], 200);
             });
+            
+
+            // Keep login-attempt logging outside DB transaction.
+            // In PostgreSQL, a failed statement inside a transaction marks it aborted.
+            $this->logAttempt($request, $user->id, true, null);
+
+            return $response;
         } catch (\Exception $e) {
             Log::error('Session Generation Error: ' . $e->getMessage());
             return response()->json(['status' => false, 'msg' => 'Token generation failed'], 500);
@@ -277,9 +295,17 @@ class AuthController extends Controller
     private function logAttempt($request, $userId, $success, $reason)
     {
         try {
+            $identifier = $request->phone_number ?? $request->email ?? 'unknown';
+
+            // login_attempts.phone_number appears to be varchar(20) in DB.
+            // Truncate to avoid QueryException and keep auth flow stable.
+            if (is_string($identifier) && strlen($identifier) > 20) {
+                $identifier = substr($identifier, 0, 20);
+            }
+
             LoginAttempt::create([
                 'user_id'        => $userId,
-                'phone_number'   => $request->phone_number ?? $request->email ?? 'unknown',
+                'phone_number'   => $identifier,
                 'ip_address'     => $request->ip(),
                 'user_agent'     => $request->userAgent(),
                 'is_success'     => $success,
