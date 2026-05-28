@@ -1,14 +1,22 @@
 <?php
 
-namespace App\Http\Controllers;
-use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Facades\Log;
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Mail\OtpMail;
+use App\Models\LoginAttempt;
 use App\Models\User;
+use App\Models\UserSession;
 use App\Services\OtpService;
 use App\Services\SmsService;
-use App\Mail\OtpMail;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
+use Illuminate\Support\Facades\Validator;
+
 class AuthController extends Controller
 {
     // ==============================
