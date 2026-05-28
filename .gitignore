@@ -23,7 +23,7 @@
 # ==============================
 # Composer & PHP
 # ==============================
-/composer.lock
+
 /auth.json
 .phpunit.result.cache
 .phpactor.json

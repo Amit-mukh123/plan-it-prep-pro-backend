@@ -3,6 +3,11 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\ChatController;
+use App\Http\Controllers\Api\UserConfigController;
+use App\Http\Controllers\Api\UserProfileController;
+use App\Http\Controllers\Api\BatchMealController;
+use App\Http\Controllers\Api\UserSummaryController;
 
 Route::get('/db-test', function () {
     try {
@@ -29,7 +34,7 @@ Route::prefix('v1')->group(function () {
         Route::post('send-otp', 'sendOtp');
         Route::post('verify-otp', 'verifyOtp');
 
-        Route::post('register-email', 'registerEmail');
+        Route::post('register', 'registerEmail');
         Route::post('login-email', 'loginEmail');
 
         Route::post('google-login', 'googleLogin');
@@ -38,7 +43,7 @@ Route::prefix('v1')->group(function () {
     });
 
     // ==============================
-    // PROTECTED ROUTES (Need Token)
+    // PROTECTED ROUTES (Need Token For Access)
     // ==============================
     Route::middleware('auth:sanctum')->group(function () {
 
@@ -51,6 +56,20 @@ Route::prefix('v1')->group(function () {
 
         // Example:
         Route::post('/logout', [AuthController::class, 'logout']);
+
+        Route::post('/user-config-store', [UserConfigController::class, 'store']);
+
+        Route::get('/user-config-show', [UserConfigController::class, 'show']);
+
+        Route::post('/user-profile-store', [UserProfileController::class, 'store']);
+
+        Route::post('/chat/generate-meal-plan', [ChatController::class, 'generateMealPlan']);
+
+        Route::get('/chat/meal-plan', [ChatController::class, 'showMealPlan']);
+
+        Route::post('/batch-meal-plan', [BatchMealController::class, 'generateBatchMeal']);
+
+        Route::get('/get-user-summary', [UserSummaryController::class, 'getSummary']);
 
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);

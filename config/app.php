@@ -99,6 +99,10 @@ return [
 
     'key' => env('APP_KEY'),
 
+    'chat_gpt_api_key' => env('CHAT_GPT_API_KEY', ''),
+    
+    'chat_gpt_model' => env('CHAT_GPT_MODEL', 'gpt-3.5-turbo'),
+
     'previous_keys' => [
         ...array_filter(
             explode(',', (string) env('APP_PREVIOUS_KEYS', ''))
