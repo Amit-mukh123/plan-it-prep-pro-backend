@@ -7,6 +7,7 @@ use App\Models\UserConfig;
 use App\Services\ChatMealPlanService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class ChatController extends Controller
 {
@@ -19,6 +20,16 @@ class ChatController extends Controller
      */
     public function generateMealPlan(Request $request): JsonResponse
     {
+        Log::info('Meal plan generation requested', [
+            'user_id' => auth()->id(),
+            'date' => $request->input('date'),
+            'refresh' => (bool) $request->input('refresh', false),
+            'ingredient_mode' => (bool) $request->input('isIngredients', false),
+            'country' => $request->input('country'),
+            'state' => $request->input('state'),
+            'city' => $request->input('city'),
+        ]);
+
         $validated = $request->validate([
             'date' => 'nullable|date',
             'refresh' => 'nullable|boolean',
@@ -95,6 +106,13 @@ class ChatController extends Controller
             $locationContext
         );
 
+        Log::info('Meal plan generation finished', [
+            'user_id' => $user->id,
+            'status' => $result['status'] ?? null,
+            'code' => $result['code'] ?? 200,
+            'source' => $result['data']['source'] ?? null,
+        ]);
+
         return response()->json(
             [
                 'status' => $result['status'],
@@ -112,6 +130,11 @@ class ChatController extends Controller
     {
         $validated = $request->validate([
             'date' => 'nullable|date',
+        ]);
+
+        Log::info('Meal plan fetch requested', [
+            'user_id' => auth()->id(),
+            'date' => $validated['date'] ?? null,
         ]);
 
         $plan = $this->mealPlanService->getSavedPlan(

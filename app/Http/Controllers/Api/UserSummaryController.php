@@ -7,6 +7,7 @@ use Illuminate\Http\JsonResponse;
 use App\Models\UserProfile;
 use App\Models\UserConfig;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 class UserSummaryController extends Controller
 {
@@ -18,6 +19,10 @@ class UserSummaryController extends Controller
         try {
             $user = auth()->user();
             $userId = $user->id;
+
+            Log::info('User summary requested', [
+                'user_id' => $userId,
+            ]);
 
             // Fetch profile & config
             $profile = UserProfile::where('user_id', $userId)->first();
@@ -90,6 +95,11 @@ class UserSummaryController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
+            Log::error('User summary fetch failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
+
             return response()->json([
                 'status' => false,
                 'message' => 'Failed to fetch summary',

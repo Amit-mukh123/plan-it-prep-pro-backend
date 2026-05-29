@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\UserConfig;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 
 class UserConfigController extends Controller
 {
@@ -15,6 +16,10 @@ class UserConfigController extends Controller
     public function store(Request $request): JsonResponse
     {
         try {
+            Log::info('User config store requested', [
+                'user_id' => auth()->id(),
+            ]);
+
             // Validate request
             $validated = $request->validate([
                 'data' => 'required|array'
@@ -37,6 +42,11 @@ class UserConfigController extends Controller
 
         } catch (\Exception $e) {
 
+            Log::error('User config store failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
+
             return response()->json([
                 'status' => false,
                 'message' => 'Failed to save config',
@@ -53,6 +63,10 @@ class UserConfigController extends Controller
         try {
             $user = auth()->user();
 
+            Log::info('User config fetch requested', [
+                'user_id' => $user->id,
+            ]);
+
             $config = UserConfig::where('user_id', $user->id)->first();
 
             return response()->json([
@@ -61,6 +75,11 @@ class UserConfigController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
+
+            Log::error('User config fetch failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json([
                 'status' => false,
@@ -78,6 +97,10 @@ class UserConfigController extends Controller
         try {
             $user = auth()->user();
 
+            Log::info('User config delete requested', [
+                'user_id' => $user->id,
+            ]);
+
             UserConfig::where('user_id', $user->id)->delete();
 
             return response()->json([
@@ -86,6 +109,11 @@ class UserConfigController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
+
+            Log::error('User config delete failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json([
                 'status' => false,
