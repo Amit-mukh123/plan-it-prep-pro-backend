@@ -34,8 +34,10 @@ Route::prefix('v1')->group(function () {
     // ==============================
     Route::controller(AuthController::class)->group(function () {
 
-        Route::post('send-otp', 'sendOtp');
-        Route::post('verify-otp', 'verifyOtp');
+        // Route::post('send-otp', 'sendOtp');
+        Route::post('send-email-otp', 'sendEmailOtp');
+        // Route::post('verify-otp', 'verifyOtp');
+        Route::post('verify-email-otp', 'verifyEmailOtp');
 
         Route::post('register', 'registerEmail');
         Route::post('login-email', 'loginEmail');

@@ -3,17 +3,16 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Mail\OtpMail;
 use App\Models\LoginAttempt;
 use App\Models\User;
 use App\Models\UserSession;
 use App\Services\OtpService;
 use App\Services\SmsService;
+use App\Services\BrevoMailService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Validator;
 
@@ -22,7 +21,7 @@ class AuthController extends Controller
     // ==============================
     // 1. SEND OTP
     // ==============================
-    public function sendOtp(Request $request, OtpService $otpService, SmsService $smsService)
+    public function sendOtp(Request $request, OtpService $otpService, SmsService $smsService, BrevoMailService $brevoMailService)
     {
         $validator = Validator::make($request->all(), [
             'phone_number' => 'required|string'
@@ -51,9 +50,9 @@ class AuthController extends Controller
             // Send SMS
             $smsService->send($user->phone_number, $otp);
 
-            // Send Email (optional)
+            // Send Email (optional) via Brevo
             if ($user->email) {
-                Mail::to($user->email)->send(new OtpMail($otp));
+                $brevoMailService->sendOtp($user->email, $otp);
             }
 
             return response()->json([
@@ -68,6 +67,131 @@ class AuthController extends Controller
                 'status' => false,
                 'msg' => 'Server Error. Please try again later.'
             ], 500);
+        }
+    }
+
+    // ==============================
+    // SEND EMAIL OTP (Passwordless Email Login)
+    // ==============================
+    public function sendEmailOtp(Request $request, OtpService $otpService, BrevoMailService $brevoMailService)
+    {
+        Log::info('Email OTP send request initiated', [
+            'email' => $request->email ?? 'unknown',
+            'ip_address' => $request->ip(),
+        ]);
+
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email'
+        ]);
+
+        if ($validator->fails()) {
+            Log::warning('Email OTP validation failed', [
+                'email' => $request->email ?? 'unknown',
+                'errors' => $validator->errors()->toArray(),
+            ]);
+            return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $user = User::where('email', $request->email)->first();
+
+            if (!$user) {
+                Log::warning('Email OTP user not found', [
+                    'email' => $request->email,
+                    'ip_address' => $request->ip(),
+                ]);
+                return response()->json(['status' => false, 'msg' => 'Account not found.'], 404);
+            }
+
+            $otp = $otpService->generateOtp($user, 'email');
+
+            $mailResult = $brevoMailService->sendOtp($user->email, $otp);
+
+            Log::info('Email OTP sent successfully', [
+                'user_id' => $user->id,
+                'email' => $user->email,
+                'mail_success' => $mailResult['success'],
+                'mail_status' => $mailResult['status'],
+            ]);
+
+            return response()->json(['status' => true, 'msg' => 'OTP sent to email'], 200);
+        } catch (\Exception $e) {
+            Log::error('Email OTP Send Error', [
+                'email' => $request->email ?? 'unknown',
+                'error_message' => $e->getMessage(),
+                'error_code' => $e->getCode(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return response()->json(['status' => false, 'msg' => 'Server Error'], 500);
+        }
+    }
+
+    // ==============================
+    // VERIFY EMAIL OTP
+    // ==============================
+    public function verifyEmailOtp(Request $request, OtpService $otpService)
+    {
+        Log::info('Email OTP verification request initiated', [
+            'email' => $request->email ?? 'unknown',
+            'ip_address' => $request->ip(),
+        ]);
+
+        $validator = Validator::make($request->all(), [
+            'email' => 'required|email',
+            'otp' => 'required|string'
+        ]);
+
+        if ($validator->fails()) {
+            Log::warning('Email OTP verification validation failed', [
+                'email' => $request->email ?? 'unknown',
+                'errors' => $validator->errors()->toArray(),
+            ]);
+            return response()->json(['status' => false, 'errors' => $validator->errors()], 422);
+        }
+
+        try {
+            $user = User::where('email', $request->email)->first();
+
+            if (!$user) {
+                Log::warning('Email OTP verification user not found', [
+                    'email' => $request->email,
+                    'ip_address' => $request->ip(),
+                ]);
+                return response()->json(['status' => false, 'msg' => 'User not found'], 404);
+            }
+
+            $result = $otpService->verifyOtp($user, $request->otp);
+
+            if (!$result['status']) {
+                Log::warning('Email OTP verification failed', [
+                    'user_id' => $user->id,
+                    'email' => $user->email,
+                    'reason' => $result['msg'],
+                    'ip_address' => $request->ip(),
+                ]);
+                return response()->json(['status' => false, 'msg' => $result['msg']], 401);
+            }
+
+            $user->update([
+                'is_verified' => true,
+                'last_login_at' => now()
+            ]);
+
+            Log::info('Email OTP verification succeeded', [
+                'user_id' => $user->id,
+                'email' => $user->email,
+                'ip_address' => $request->ip(),
+            ]);
+
+            return $this->generateSession($user, $request);
+        } catch (\Exception $e) {
+            Log::error('Email OTP Verify Error', [
+                'email' => $request->email ?? 'unknown',
+                'error_message' => $e->getMessage(),
+                'error_code' => $e->getCode(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return response()->json(['status' => false, 'msg' => 'Server Error'], 500);
         }
     }
 

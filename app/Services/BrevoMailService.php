@@ -9,8 +9,9 @@ class BrevoMailService
 {
     public function sendOtp(string $toEmail, string $otp): array
     {
-        Log::info('Brevo OTP email send requested', [
+        Log::info('Brevo OTP email send initiated', [
             'to_email' => $toEmail,
+            'timestamp' => now()->toIso8601String(),
         ]);
 
         $response = Http::withHeaders([
@@ -40,11 +41,15 @@ class BrevoMailService
             Log::info('Brevo OTP email sent successfully', [
                 'to_email' => $toEmail,
                 'status' => $response->status(),
+                'message_id' => $response->json()['id'] ?? null,
+                'timestamp' => now()->toIso8601String(),
             ]);
         } else {
-            Log::error('Brevo OTP email failed', [
+            Log::error('Brevo OTP email send failed', [
                 'to_email' => $toEmail,
                 'status' => $response->status(),
+                'response_body' => $response->json(),
+                'timestamp' => now()->toIso8601String(),
             ]);
         }
 
