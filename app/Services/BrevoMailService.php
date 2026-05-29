@@ -3,11 +3,16 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class BrevoMailService
 {
     public function sendOtp(string $toEmail, string $otp): array
     {
+        Log::info('Brevo OTP email send requested', [
+            'to_email' => $toEmail,
+        ]);
+
         $response = Http::withHeaders([
             'api-key' => config('services.brevo.key'),
             'accept' => 'application/json',
@@ -30,6 +35,18 @@ class BrevoMailService
                 </div>
             ",
         ]);
+
+        if ($response->successful()) {
+            Log::info('Brevo OTP email sent successfully', [
+                'to_email' => $toEmail,
+                'status' => $response->status(),
+            ]);
+        } else {
+            Log::error('Brevo OTP email failed', [
+                'to_email' => $toEmail,
+                'status' => $response->status(),
+            ]);
+        }
 
         return [
             'success' => $response->successful(),

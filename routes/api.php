@@ -1,6 +1,7 @@
 <?php
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
+use App\Http\Middleware\RequestLoggingMiddleware;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\ChatController;
@@ -8,6 +9,8 @@ use App\Http\Controllers\Api\UserConfigController;
 use App\Http\Controllers\Api\UserProfileController;
 use App\Http\Controllers\Api\BatchMealController;
 use App\Http\Controllers\Api\UserSummaryController;
+
+Route::middleware([RequestLoggingMiddleware::class])->group(function () {
 
 Route::get('/db-test', function () {
     try {
@@ -74,4 +77,6 @@ Route::prefix('v1')->group(function () {
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);
     });
+});
+
 });

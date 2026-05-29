@@ -9,6 +9,7 @@ use App\Models\UserProfile;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Log;
 
 class ChatMealPlanService
 {
@@ -32,7 +33,18 @@ class ChatMealPlanService
     ): array
     {
         set_time_limit(300); 
+        Log::info('Meal plan service started', [
+            'user_id' => $user->id,
+            'date' => $date,
+            'refresh' => $refresh,
+            'ingredient_mode' => $isIngredientMode,
+        ]);
+
         if (!Schema::hasTable('daily_diet_plans')) {
+            Log::error('Meal plan service aborted: daily_diet_plans table missing', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'Table daily_diet_plans does not exist. Please create it in the database before generating meal plans.',
@@ -51,6 +63,12 @@ class ChatMealPlanService
             ->get();
 
         if (!$refresh && $activePlans->isNotEmpty()) {
+            Log::info('Meal plan served from database', [
+                'user_id' => $user->id,
+                'date' => $planDate,
+                'meal_count' => $activePlans->count(),
+            ]);
+
             $aggregated = $this->aggregatePlans($activePlans, $planDate);
 
             return [
@@ -65,6 +83,10 @@ class ChatMealPlanService
         $config = UserConfig::where('user_id', $user->id)->first();
 
         if (!$profile) {
+            Log::warning('Meal plan service aborted: profile not found', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'User profile not found. Please complete profile first.',
@@ -73,6 +95,10 @@ class ChatMealPlanService
         }
 
         if (!$config) {
+            Log::warning('Meal plan service aborted: config not found', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'User config not found. Please save preferences first.',
@@ -83,6 +109,10 @@ class ChatMealPlanService
         $normalizedProvidedIngredients = $this->normalizeProvidedIngredients($providedIngredients);
 
         if ($isIngredientMode && count($normalizedProvidedIngredients) === 0) {
+            Log::warning('Meal plan service aborted: ingredient mode without ingredients', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'Ingredient mode is enabled, but no valid ingredients were provided.',
@@ -103,6 +133,10 @@ class ChatMealPlanService
 
         $apiKey = (string) config('app.chat_gpt_api_key');
         if ($apiKey === '') {
+            Log::error('Meal plan service aborted: OpenAI key missing', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'CHAT_GPT_API_KEY is not configured.',
@@ -128,12 +162,19 @@ class ChatMealPlanService
                 'response_format' => ['type' => 'json_object'],
             ]);
 
-        \Log::info('OpenAI Response:', [
-    'status' => $response->status(),
-    'body' => $response->body(),
-]);
+        Log::info('OpenAI meal plan response received', [
+            'user_id' => $user->id,
+            'status' => $response->status(),
+            'successful' => $response->successful(),
+        ]);
 
         if (!$response->successful()) {
+            Log::error('OpenAI meal plan request failed', [
+                'user_id' => $user->id,
+                'status' => $response->status(),
+                'error' => $response->json('error.message'),
+            ]);
+
             return [
                 'status' => false,
                 'message' => $response->json('error.message') ?? 'Failed to generate meal plan.',
@@ -145,6 +186,10 @@ class ChatMealPlanService
         $decoded = json_decode($rawContent, true);
 
         if (!is_array($decoded)) {
+            Log::error('OpenAI meal plan returned invalid JSON', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'Invalid AI response JSON.',
@@ -154,6 +199,10 @@ class ChatMealPlanService
 
         $meals = $this->normalizeMeals($decoded);
         if (count($meals) === 0) {
+            Log::error('OpenAI meal plan response contained no meals', [
+                'user_id' => $user->id,
+            ]);
+
             return [
                 'status' => false,
                 'message' => 'AI response did not contain meals.',

@@ -10,6 +10,7 @@ use App\Models\UserProfile;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Carbon\Carbon;
 
 class BatchMealController extends Controller
@@ -19,9 +20,18 @@ class BatchMealController extends Controller
     // ============================
     public function generateBatchMeal(Request $request)
     {
+        Log::info('Batch meal generation requested', [
+            'user_id' => $request->input('user_id'),
+            'protein_target' => $request->input('protein_target'),
+        ]);
+
         $user = User::find($request->user_id);
 
         if (!$user) {
+            Log::warning('Batch meal generation aborted: user not found', [
+                'user_id' => $request->input('user_id'),
+            ]);
+
             return response()->json(['status' => false, 'msg' => 'User not found'], 404);
         }
 
@@ -29,6 +39,12 @@ class BatchMealController extends Controller
         $profile = UserProfile::where('user_id', $user->id)->first();
 
         if (!$config || !$profile) {
+            Log::warning('Batch meal generation aborted: config/profile missing', [
+                'user_id' => $user->id,
+                'config_found' => (bool) $config,
+                'profile_found' => (bool) $profile,
+            ]);
+
             return response()->json(['status' => false, 'msg' => 'Config/Profile missing'], 400);
         }
 
@@ -69,6 +85,10 @@ class BatchMealController extends Controller
         $response = $this->callGPT($payload);
 
         if (!$response) {
+            Log::error('Batch meal GPT call failed', [
+                'user_id' => $user->id,
+            ]);
+
             return response()->json(['status' => false, 'msg' => 'GPT failed'], 500);
         }
 
@@ -83,6 +103,12 @@ class BatchMealController extends Controller
 
             $savedMeals = $this->storeMeals($user, $response, $gap);
 
+            Log::info('Batch meals generated successfully', [
+                'user_id' => $user->id,
+                'meal_count' => count($savedMeals),
+                'gap' => $gap,
+            ]);
+
             DB::commit();
 
             return response()->json([
@@ -93,6 +119,11 @@ class BatchMealController extends Controller
 
         } catch (\Exception $e) {
             DB::rollBack();
+            Log::error('Batch meal generation failed', [
+                'user_id' => $user->id,
+                'error' => $e->getMessage(),
+            ]);
+
             return response()->json(['status' => false, 'msg' => $e->getMessage()], 500);
         }
     }
@@ -169,8 +200,18 @@ Return JSON:
             'response_format' => ['type' => 'json_object']
         ]);
 
-        if (!$response->successful()) return null;
-        \Log::info($response);
+        if (!$response->successful()) {
+            Log::error('Batch meal GPT response failed', [
+                'status' => $response->status(),
+            ]);
+
+            return null;
+        }
+
+        Log::info('Batch meal GPT response received', [
+            'status' => $response->status(),
+            'successful' => true,
+        ]);
 
         return json_decode($response['choices'][0]['message']['content'], true);
     }

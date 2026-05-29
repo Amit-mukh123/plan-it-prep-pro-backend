@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\UserProfile;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 
 class UserProfileController extends Controller
 {
@@ -15,6 +16,10 @@ class UserProfileController extends Controller
     public function store(Request $request): JsonResponse
     {
         try {
+            Log::info('User profile store requested', [
+                'user_id' => auth()->id(),
+            ]);
+
             //  Get authenticated user ID (from token)
             $userId = auth()->user()->id;
 
@@ -56,6 +61,11 @@ class UserProfileController extends Controller
 
         } catch (\Exception $e) {
 
+            Log::error('User profile store failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
+
             return response()->json([
                 'status' => false,
                 'message' => 'Failed to save profile',
@@ -73,6 +83,10 @@ class UserProfileController extends Controller
             // Get authenticated user ID
             $userId = auth()->user()->id;
 
+            Log::info('User profile fetch requested', [
+                'user_id' => $userId,
+            ]);
+
             // Fetch profile
             $profile = UserProfile::where('user_id', $userId)->first();
 
@@ -82,6 +96,11 @@ class UserProfileController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
+
+            Log::error('User profile fetch failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json([
                 'status' => false,
@@ -99,6 +118,10 @@ class UserProfileController extends Controller
         try {
             // Get authenticated user ID
             $userId = auth()->user()->id;
+
+            Log::info('User profile delete requested', [
+                'user_id' => $userId,
+            ]);
 
             // Find profile
             $profile = UserProfile::where('user_id', $userId)->first();
@@ -119,6 +142,11 @@ class UserProfileController extends Controller
             ], 200);
 
         } catch (\Exception $e) {
+
+            Log::error('User profile delete failed', [
+                'user_id' => auth()->id(),
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json([
                 'status' => false,
