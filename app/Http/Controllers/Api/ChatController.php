@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\UserConfig;
+use App\Models\DailyDietPlans;
 use App\Services\ChatMealPlanService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -155,5 +156,80 @@ class ChatController extends Controller
             'message' => 'Meal plan fetched successfully.',
             'data' => $plan,
         ]);
+    }
+
+    /**
+     * Refresh a single meal by ID (specific to breakfast/lunch/dinner/snacks).
+     */
+    public function refreshSingleMeal(Request $request, string $mealId): JsonResponse
+    {
+        Log::info('Single meal refresh requested', [
+            'user_id' => auth()->id(),
+            'meal_id' => $mealId,
+        ]);
+
+        $validated = $request->validate([
+            'isIngredients' => 'nullable|boolean',
+            'ingredients' => 'nullable|array',
+            'country' => 'nullable|string|max:100',
+            'state' => 'nullable|string|max:100',
+            'city' => 'nullable|string|max:100',
+        ]);
+
+
+        $user = auth()->user();
+
+        // Validate that the meal exists and belongs to this user before attempting refresh.
+        $existing = DailyDietPlans::where('id', $mealId)
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (!$existing) {
+            Log::warning('Single meal refresh - meal not found or not owned by user', [
+                'user_id' => $user->id,
+                'meal_id' => $mealId,
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'message' => 'Meal not found or does not belong to the authenticated user.',
+                'data' => null,
+            ], 404);
+        }
+
+        $isIngredientMode = (bool) (
+            $validated['isIngredients']
+            ?? false
+        );
+
+        $providedIngredients = $validated['ingredients'] ?? [];
+        $locationContext = [
+            'country' => $validated['country'] ?? null,
+            'state' => $validated['state'] ?? null,
+            'city' => $validated['city'] ?? null,
+        ];
+
+        $result = $this->mealPlanService->refreshSingleMealById(
+            $user,
+            $mealId,
+            $isIngredientMode,
+            is_array($providedIngredients) ? $providedIngredients : [],
+            $locationContext
+        );
+
+        Log::info('Single meal refresh finished', [
+            'user_id' => $user->id,
+            'meal_id' => $mealId,
+            'status' => $result['status'] ?? null,
+        ]);
+
+        return response()->json(
+            [
+                'status' => $result['status'],
+                'message' => $result['message'],
+                'data' => $result['data'] ?? null,
+            ],
+            $result['code'] ?? 200
+        );
     }
 }
