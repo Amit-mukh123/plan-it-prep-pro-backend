@@ -700,4 +700,177 @@ PROMPT;
 
         return array_values($items);
     }
+
+    /**
+     * Refresh a single daily meal record by meal ID.
+     */
+    public function refreshSingleMealById(
+        User $user,
+        string $mealId,
+        bool $isIngredientMode = false,
+        array $providedIngredients = [],
+        array $locationContext = []
+    ): array
+    {
+        Log::info('Single meal refresh service started', [
+            'user_id' => $user->id,
+            'meal_id' => $mealId,
+        ]);
+
+        $meal = DailyDietPlans::query()->find($mealId);
+
+        if (!$meal) {
+            return [
+                'status' => false,
+                'message' => 'Meal not found.',
+                'code' => 404,
+            ];
+        }
+
+        if ($meal->user_id !== $user->id) {
+            return [
+                'status' => false,
+                'message' => 'Unauthorized meal refresh request.',
+                'code' => 403,
+            ];
+        }
+
+        $profile = UserProfile::query()->where('user_id', $user->id)->first();
+        $config = UserConfig::query()->where('user_id', $user->id)->first();
+
+        if (!$profile || !$config) {
+            return [
+                'status' => false,
+                'message' => 'User profile or config not found.',
+                'code' => 422,
+            ];
+        }
+
+        $normalizedIngredients = $this->normalizeProvidedIngredients($providedIngredients);
+
+        if ($isIngredientMode && count($normalizedIngredients) === 0) {
+            return [
+                'status' => false,
+                'message' => 'Ingredient mode enabled, but no ingredients were provided.',
+                'code' => 422,
+            ];
+        }
+
+        $apiKey = (string) config('app.chat_gpt_api_key');
+        if ($apiKey === '') {
+            return [
+                'status' => false,
+                'message' => 'CHAT_GPT_API_KEY is not configured.',
+                'code' => 500,
+            ];
+        }
+
+        $mealType = (string) $meal->meal_type;
+        $mealLabel = match ($mealType) {
+            'breakfast' => 'Breakfast',
+            'lunch' => 'Lunch',
+            'dinner' => 'Dinner',
+            default => 'Snack',
+        };
+
+        $prompt = [
+            'meal_id' => $meal->id,
+            'meal_type' => $mealType,
+            'date' => $meal->date,
+            'location' => [
+                'country' => $locationContext['country'] ?? null,
+                'state' => $locationContext['state'] ?? null,
+                'city' => $locationContext['city'] ?? null,
+            ],
+            'ingredient_mode' => $isIngredientMode,
+            'ingredients' => $normalizedIngredients,
+            'profile' => [
+                'full_name' => $profile->full_name,
+                'gender' => $profile->gender,
+                'age' => $profile->age,
+                'height_cm' => $profile->height_cm,
+                'weight_kg' => $profile->weight_kg,
+                'target_weight_kg' => $profile->target_weight_kg,
+                'diet_preference' => $profile->diet_preference,
+            ],
+            'config' => $config->data ?? [],
+        ];
+
+        $systemPrompt = $isIngredientMode
+            ? "Generate exactly one {$mealLabel} meal using the provided ingredients. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object."
+            : "Generate exactly one {$mealLabel} meal. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object.";
+
+        $response = Http::timeout(90)
+            ->withHeaders([
+                'Authorization' => 'Bearer ' . $apiKey,
+            ])
+            ->post('https://api.openai.com/v1/chat/completions', [
+                'model' => (string) config('app.chat_gpt_model', 'gpt-4o-mini'),
+                'messages' => [
+                    ['role' => 'system', 'content' => $systemPrompt],
+                    ['role' => 'user', 'content' => json_encode($prompt)],
+                ],
+                'response_format' => ['type' => 'json_object'],
+            ]);
+
+        if (!$response->successful()) {
+            return [
+                'status' => false,
+                'message' => 'Failed to regenerate meal.',
+                'code' => 500,
+            ];
+        }
+
+        $decoded = json_decode((string) data_get($response->json(), 'choices.0.message.content', '{}'), true);
+
+        if (!is_array($decoded) || !isset($decoded['meals'][0])) {
+            return [
+                'status' => false,
+                'message' => 'Invalid AI response.',
+                'code' => 500,
+            ];
+        }
+
+        $newMeal = $decoded['meals'][0];
+        $groceryRequirements = $this->normalizeGroceryRequirements($decoded, [$newMeal]);
+
+        // Deactivate ALL active meals of the same type on the same date for this user.
+        // This ensures only the new meal is active for that type/date combination.
+        DailyDietPlans::query()
+            ->where('user_id', $user->id)
+            ->where('date', $meal->date)
+            ->where('meal_type', $mealType)
+            ->where('is_active', true)
+            ->update(['is_active' => false]);
+
+        $saved = DailyDietPlans::create([
+            'user_id' => $user->id,
+            'date' => $meal->date,
+            'meal_type' => $mealType,
+            'is_active' => true,
+            'is_favourite' => false,
+            'response' => [
+                'meal' => $newMeal,
+                'groceryRequirements' => $groceryRequirements,
+                'meta' => [
+                    'refreshed_from_meal_id' => $meal->id,
+                    'generated_at' => now()->toDateTimeString(),
+                    'ingredient_mode' => $isIngredientMode,
+                    'provided_ingredients' => $normalizedIngredients,
+                ],
+            ],
+        ]);
+
+        return [
+            'status' => true,
+            'message' => 'Meal refreshed successfully.',
+            'code' => 200,
+            'data' => [
+                'id' => $saved->id,
+                'meal_type' => $saved->meal_type,
+                'date' => $saved->date,
+                'response' => $saved->response,
+            ],
+        ];
+    }
 }

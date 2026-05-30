@@ -72,6 +72,8 @@ Route::prefix('v1')->group(function () {
 
         Route::get('/chat/meal-plan', [ChatController::class, 'showMealPlan']);
 
+        Route::post('/chat/meal/{mealId}/refresh', [ChatController::class, 'refreshSingleMeal']);
+
         Route::post('/batch-meal-plan', [BatchMealController::class, 'generateBatchMeal']);
 
         Route::get('/get-user-summary', [UserSummaryController::class, 'getSummary']);
