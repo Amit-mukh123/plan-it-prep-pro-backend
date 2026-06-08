@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\UserConfigController;
 use App\Http\Controllers\Api\UserProfileController;
 use App\Http\Controllers\Api\BatchMealController;
 use App\Http\Controllers\Api\UserSummaryController;
+use App\Http\Controllers\Api\MaintenanceController;
 
 Route::middleware([RequestLoggingMiddleware::class])->group(function () {
 
@@ -46,7 +47,7 @@ Route::prefix('v1')->group(function () {
 
         Route::post('refresh-token', 'refreshToken');
     });
-
+    Route::get('/maintenance/state', [MaintenanceController::class, 'fetchState']);
     // ==============================
     // PROTECTED ROUTES (Need Token For Access)
     // ==============================
@@ -80,6 +81,12 @@ Route::prefix('v1')->group(function () {
 
         // future APIs
         // Route::get('/dashboard', [DashboardController::class, 'index']);
+        Route::prefix('maintenance')->group(function (){
+            Route::post('/create', [MaintenanceController::class, 'create']);
+            Route::delete('/delete/{id}', [MaintenanceController::class, 'delete']);
+            Route::put('/update/{id}', [MaintenanceController::class, 'update']);
+            Route::get('/all', [MaintenanceController::class, 'getAll']);
+        });
     });
 });
 
