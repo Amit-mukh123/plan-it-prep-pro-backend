@@ -12,7 +12,11 @@ return new class extends Migration
         Schema::create('user_config', function (Blueprint $table) {
 
             // UUID auto-generated from PostgreSQL
-            $table->uuid('id')->primary()->default(DB::raw('gen_random_uuid()'));
+            if (DB::getDriverName() === 'sqlite') {
+                $table->uuid('id')->primary();
+            } else {
+                $table->uuid('id')->primary()->default(DB::raw('gen_random_uuid()'));
+            }
 
             // Explicit foreign key
             $table->uuid('user_id');

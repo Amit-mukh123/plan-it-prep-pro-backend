@@ -17,7 +17,10 @@ class MaintenanceService
         return Cache::remember(self::CACHE_KEY, 30, function () {
             
             // Get the most recent upcoming or active maintenance
-            $event = Maintenance::where('end_time', '>', now())->orderBy('start_time', 'asc')->first();
+            $event = Maintenance::where('is_deleted', false)
+                ->where('end_time', '>', now())
+                ->orderBy('start_time', 'asc')
+                ->first();
 
             if (!$event) return null;
 
@@ -64,22 +67,37 @@ class MaintenanceService
         });
     }
 
+    private function mapData(array $data): array
+    {
+        $mapped = [];
+        $mappings = [
+            'startTime' => 'start_time',
+            'endTime' => 'end_time',
+            'appType' => 'app_type',
+            'affectedServices' => 'affected_services',
+            'allowWhitelist' => 'allow_whitelist',
+            'notifyBeforeMinutes' => 'notify_before_minutes',
+            'gracePeriodMinutes' => 'grace_period_minutes',
+            'isEmergency' => 'is_emergency'
+        ];
+
+        foreach ($data as $key => $value) {
+            $mappedKey = $mappings[$key] ?? $key;
+            $mapped[$mappedKey] = $value;
+        }
+
+        return $mapped;
+    }
+
     public function createMaintenance(array $data, string $userId)
     {
-        // Map camelCase DTO to snake_case DB columns
-        $data['start_time'] = $data['startTime'];
-        $data['end_time'] = $data['endTime'];
-        $data['created_by'] = $userId;
+        $mappedData = $this->mapData($data);
+        $mappedData['created_by'] = $userId;
         
-        $maintenance = Maintenance::create($data);
+        $maintenance = Maintenance::create($mappedData);
 
         // Clear cache
         Cache::forget(self::CACHE_KEY);
-
-        // In Laravel, instead of manual RabbitMQ enqueueJob, you dispatch a Job:
-        // if ($maintenance->notify) {
-        //     MaintenanceNotificationJob::dispatch($maintenance)->delay($maintenance->start_time->subMinutes($maintenance->notify_before_minutes));
-        // }
 
         return $maintenance;
     }
@@ -88,7 +106,10 @@ class MaintenanceService
     public function deleteMaintenance(string $id)
     {
         $maintenance = Maintenance::findOrFail($id);
-        $maintenance->update(['is_deleted' => true]);
+        $maintenance->is_deleted = true;
+        $maintenance->save();
+        $maintenance->delete();
+        
         Cache::forget(self::CACHE_KEY);
         return $maintenance;
     }
@@ -102,16 +123,43 @@ class MaintenanceService
     {
         $maintenance = Maintenance::findOrFail($id);
         
-        // Map camelCase DTO to snake_case DB columns if they exist
-        if (isset($data['startTime'])) {
-            $data['start_time'] = $data['startTime'];
-        }
-        if (isset($data['endTime'])) {
-            $data['end_time'] = $data['endTime'];
-        }
+        $mappedData = $this->mapData($data);
 
-        $maintenance->update($data);
+        $maintenance->update($mappedData);
         Cache::forget(self::CACHE_KEY);
         return $maintenance;
+    }
+
+    public function getMaintenanceSchedule()
+    {
+        $now = now();
+        
+        // Upcoming/active maintenance events (end_time is in the future)
+        $schedule = Maintenance::where('is_deleted', false)
+            ->where('end_time', '>', $now)
+            ->orderBy('start_time', 'asc')
+            ->get();
+
+        // // The very next upcoming maintenance event (start_time is in the future)
+        // $next = Maintenance::where('is_deleted', false)
+        //     ->where('start_time', '>', $now)
+        //     ->orderBy('start_time', 'asc')
+        //     ->first();
+
+        return [
+            'schedule' => $schedule,
+            // 'next' => $next
+        ];
+    }
+
+    public function getMaintenanceHistory()
+    {
+        $now = now();
+        
+        // Past maintenance events (end_time is in the past)
+        return Maintenance::where('is_deleted', false)
+            ->where('end_time', '<=', $now)
+            ->orderBy('start_time', 'desc')
+            ->get();
     }
 }

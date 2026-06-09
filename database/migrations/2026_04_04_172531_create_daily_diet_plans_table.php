@@ -12,7 +12,11 @@ return new class extends Migration
         Schema::create('daily_diet_plans', function (Blueprint $table) {
 
             // UUID primary key (PostgreSQL)
-            $table->uuid('id')->primary()->default(DB::raw('gen_random_uuid()'));
+            if (DB::getDriverName() === 'sqlite') {
+                $table->uuid('id')->primary();
+            } else {
+                $table->uuid('id')->primary()->default(DB::raw('gen_random_uuid()'));
+            }
 
             // Foreign key to users table
             $table->foreignUuid('user_id')

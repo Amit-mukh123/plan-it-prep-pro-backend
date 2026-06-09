@@ -47,7 +47,7 @@ Route::prefix('v1')->group(function () {
 
         Route::post('refresh-token', 'refreshToken');
     });
-    Route::get('/maintenance/state', [MaintenanceController::class, 'fetchState']);
+
     // ==============================
     // PROTECTED ROUTES (Need Token For Access)
     // ==============================
@@ -86,6 +86,9 @@ Route::prefix('v1')->group(function () {
             Route::delete('/delete/{id}', [MaintenanceController::class, 'delete']);
             Route::put('/update/{id}', [MaintenanceController::class, 'update']);
             Route::get('/all', [MaintenanceController::class, 'getAll']);
+            Route::get('/state', [MaintenanceController::class, 'fetchState']);
+            Route::get('/schedule', [MaintenanceController::class, 'schedule']);
+            Route::get('/history', [MaintenanceController::class, 'history']);
         });
     });
 });
