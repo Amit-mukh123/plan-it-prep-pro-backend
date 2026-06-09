@@ -74,4 +74,26 @@ class MaintenanceController extends Controller
             'data' => $maintenance
         ]);
     }
+
+    public function schedule()
+    {
+        $schedule = $this->maintenanceService->getMaintenanceSchedule();
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Maintenance schedule fetched successfully',
+            'data' => $schedule
+        ]);
+    }
+
+    public function history()
+    {
+        $history = $this->maintenanceService->getMaintenanceHistory();
+        
+        return response()->json([
+            'success' => true,
+            'message' => 'Maintenance history fetched successfully',
+            'data' => $history
+        ]);
+    }
 }
