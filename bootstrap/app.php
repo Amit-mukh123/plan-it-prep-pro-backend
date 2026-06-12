@@ -12,8 +12,14 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // Register short-name aliases for the two new middleware classes.
+        // Routes can use either the FQCN (as in api.php) or these alias strings.
+        $middleware->alias([
+            'maintenance.check' => \App\Http\Middleware\MaintenanceCheckMiddleware::class,
+            'force.update'      => \App\Http\Middleware\ForceUpdateMiddleware::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
     })->create();
+
