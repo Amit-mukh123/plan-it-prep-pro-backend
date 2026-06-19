@@ -82,7 +82,7 @@ class ChatMealPlanService
         $profile = UserProfile::where('user_id', $user->id)->first();
         $config = UserConfig::where('user_id', $user->id)->first();
 
-        if (!$profile) {
+        if ($profile === null) {
             Log::warning('Meal plan service aborted: profile not found', [
                 'user_id' => $user->id,
             ]);
@@ -91,10 +91,11 @@ class ChatMealPlanService
                 'status' => false,
                 'message' => 'User profile not found. Please complete profile first.',
                 'code' => 422,
+                'isProfileSetup' => false,
             ];
         }
 
-        if (!$config) {
+        if ($config === null) {
             Log::warning('Meal plan service aborted: config not found', [
                 'user_id' => $user->id,
             ]);
@@ -103,6 +104,7 @@ class ChatMealPlanService
                 'status' => false,
                 'message' => 'User config not found. Please save preferences first.',
                 'code' => 422,
+                'isConfigSetup' => false,
             ];
         }
 
@@ -120,6 +122,19 @@ class ChatMealPlanService
             ];
         }
 
+        $configData = is_array($config->data ?? null) ? $config->data : [];
+        $answers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
+
+        // Parse target_calorie (e.g., "1800 kcal (Moderate)")
+        $targetCalorieString = $answers['target_calorie'] ?? $configData['target_calorie'] ?? '2000';
+        preg_match('/\d+/', (string) $targetCalorieString, $calorieMatches);
+        $calorieTarget = isset($calorieMatches[0]) ? (int) $calorieMatches[0] : 2000;
+
+        // Parse meals_per_day (e.g., "4 meals")
+        $mealsPerDayString = $answers['meals_per_day'] ?? $configData['meals_per_day'] ?? '3';
+        preg_match('/\d+/', (string) $mealsPerDayString, $mealsMatches);
+        $mealsPerDay = isset($mealsMatches[0]) ? (int) $mealsMatches[0] : 3;
+
         $promptPayload = $this->buildPromptPayload(
             $user,
             $profile,
@@ -127,9 +142,11 @@ class ChatMealPlanService
             $planDate,
             $isIngredientMode,
             $normalizedProvidedIngredients,
-            $locationContext
+            $locationContext,
+            $calorieTarget,
+            $mealsPerDay
         );
-        $systemPrompt = $this->buildSystemPrompt($isIngredientMode);
+        $systemPrompt = $this->buildSystemPrompt($mealsPerDay, $calorieTarget, $isIngredientMode);
 
         $apiKey = (string) config('app.chat_gpt_api_key');
         if ($apiKey === '') {
@@ -383,7 +400,9 @@ class ChatMealPlanService
         string $planDate,
         bool $isIngredientMode,
         array $providedIngredients,
-        array $locationContext
+        array $locationContext,
+        int $calorieTarget,
+        int $mealsPerDay
     ): array
     {
         $configData = is_array($config->data ?? null) ? $config->data : [];
@@ -453,13 +472,15 @@ class ChatMealPlanService
                 'diet_preference' => $profile->diet_preference,
             ],
             'config' => $config->data ?? [],
+            'calorie_target' => $calorieTarget,
+            'meals_per_day' => $mealsPerDay,
         ];
     }
 
     /**
      * System prompt with strict response schema.
      */
-    private function buildSystemPrompt(bool $isIngredientMode = false): string
+    private function buildSystemPrompt(int $mealsPerDay, int $calorieTarget, bool $isIngredientMode = false): string
     {
         if ($isIngredientMode) {
             return <<<PROMPT
@@ -477,7 +498,12 @@ Location rules:
 You MUST prioritize the provided ingredients and suggest meals that can be made using them.
 Also identify additional missing ingredients needed to complete cooking.
 
-Must follow user allergies, diet, preferences, calorie target, meal count, prep style, appliances, and cooking time. Allergy safety has highest priority.
+Strict Diet & Calorie Constraints:
+- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
+- The total calories of all generated meals combined MUST sum up exactly to $calorieTarget kcal (tolerance: ±10 kcal).
+- Distribute the calories logically across the $mealsPerDay meals (e.g. Breakfast, Lunch, Dinner, Snack).
+- Each meal object's "calories" key must be a valid integer.
+- The meals must strictly follow user allergies (allergy safety has highest priority), diet/food preferences, prep style, kitchen appliances, and cooking time limits from config.
 
 Output JSON only (no markdown/text) with exactly these top keys:
 1) meals: array of meal objects with keys
@@ -485,7 +511,7 @@ id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTim
 2) groceryRequirements: array of objects with keys item, quantity, category.
 
 Requirements:
-- Include at least Breakfast, Lunch, Dinner.
+- You MUST include exactly $mealsPerDay meals in the meals array.
 - Meals should clearly reflect usage of provided ingredients when possible.
 - groceryRequirements must contain additional/missing ingredients needed to cook the selected meals.
 - Do not include ingredients that are already sufficiently available in provided ingredients.
@@ -506,7 +532,12 @@ Location rules:
     - If state is selected, city suggestions should only belong to that state.
 - If location is incomplete, fall back to config/profile and keep meals broadly regional-safe.
 
-Must follow user allergies, diet, preferences, calorie target, meal count, prep style, appliances, and cooking time. Allergy safety has highest priority.
+Strict Diet & Calorie Constraints:
+- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
+- The total calories of all generated meals combined MUST sum up exactly to $calorieTarget kcal (tolerance: ±10 kcal).
+- Distribute the calories logically across the $mealsPerDay meals (e.g. Breakfast, Lunch, Dinner, Snack).
+- Each meal object's "calories" key must be a valid integer.
+- The meals must strictly follow user allergies (allergy safety has highest priority), diet/food preferences, prep style, kitchen appliances, and cooking time limits from config.
 
 Output JSON only (no markdown/text) with exactly these top keys:
 1) meals: array of meal objects with keys
@@ -514,7 +545,7 @@ id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTim
 2) groceryRequirements: array of objects with keys item, quantity, category.
 
 Requirements:
-- Include at least Breakfast, Lunch, Dinner.
+- You MUST include exactly $mealsPerDay meals in the meals array.
 - Main meals should usually have 5+ ingredients and clear steps.
 - groceryRequirements must be consolidated for the day, include oils/spices/sauces, merge duplicates, and use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).
 - Keep meals realistic for home cooking and nutritionally aligned to goal.
@@ -738,11 +769,21 @@ PROMPT;
         $profile = UserProfile::query()->where('user_id', $user->id)->first();
         $config = UserConfig::query()->where('user_id', $user->id)->first();
 
-        if (!$profile || !$config) {
+        if ($profile === null) {
             return [
                 'status' => false,
-                'message' => 'User profile or config not found.',
+                'message' => 'User profile not found.',
                 'code' => 422,
+                'isProfileSetup' => false,
+            ];
+        }
+
+        if ($config === null) {
+            return [
+                'status' => false,
+                'message' => 'User config not found.',
+                'code' => 422,
+                'isConfigSetup' => false,
             ];
         }
 
