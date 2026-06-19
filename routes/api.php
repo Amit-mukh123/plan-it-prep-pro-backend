@@ -4,7 +4,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Route;
 use App\Http\Middleware\RequestLoggingMiddleware;
 use App\Http\Middleware\MaintenanceCheckMiddleware;
-// use App\Http\Middleware\ForceUpdateMiddleware;
+use App\Http\Middleware\ForceUpdateMiddleware;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\UserConfigController;
@@ -72,7 +72,7 @@ Route::middleware([RequestLoggingMiddleware::class])->group(function () {
         // ──────────────────────────────────────────────────
         Route::middleware([
             MaintenanceCheckMiddleware::class,
-            // ForceUpdateMiddleware::class,
+            ForceUpdateMiddleware::class,
             'auth:sanctum',
         ])->group(function () {
 
