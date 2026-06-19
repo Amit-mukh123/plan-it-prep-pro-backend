@@ -115,11 +115,14 @@ class ChatController extends Controller
         ]);
 
         return response()->json(
-            [
-                'status' => $result['status'],
-                'message' => $result['message'],
-                'data' => $result['data'] ?? null,
-            ],
+            array_merge(
+                [
+                    'status' => $result['status'],
+                    'message' => $result['message'],
+                    'data' => $result['data'] ?? null,
+                ],
+                array_diff_key($result, array_flip(['code', 'data']))
+            ),
             $result['code'] ?? 200
         );
     }
@@ -224,11 +227,14 @@ class ChatController extends Controller
         ]);
 
         return response()->json(
-            [
-                'status' => $result['status'],
-                'message' => $result['message'],
-                'data' => $result['data'] ?? null,
-            ],
+            array_merge(
+                [
+                    'status' => $result['status'],
+                    'message' => $result['message'],
+                    'data' => $result['data'] ?? null,
+                ],
+                array_diff_key($result, array_flip(['code', 'data']))
+            ),
             $result['code'] ?? 200
         );
     }
