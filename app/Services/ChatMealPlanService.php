@@ -146,7 +146,18 @@ class ChatMealPlanService
             $calorieTarget,
             $mealsPerDay
         );
-        $systemPrompt = $this->buildSystemPrompt($mealsPerDay, $calorieTarget, $isIngredientMode);
+
+        $preferences = [
+            'allergies' => $answers['allergies'] ?? ($configData['allergies'] ?? 'None'),
+            'food_preference' => $answers['food_pref'] ?? ($configData['food_pref'] ?? 'None'),
+            'diet_preference' => $profile->diet_preference ?? 'None',
+            'prep_style' => $answers['prep_style'] ?? ($configData['prep_style'] ?? 'None'),
+            'appliances' => $answers['appliances'] ?? ($configData['appliances'] ?? 'Stove & Oven'),
+            'cooking_time' => $answers['cooking_time'] ?? ($configData['cooking_time'] ?? 'Anytime'),
+            'health_goal' => $answers['health_goal'] ?? ($configData['health_goal'] ?? 'None'),
+        ];
+
+        $systemPrompt = $this->buildSystemPrompt($mealsPerDay, $calorieTarget, $isIngredientMode, $preferences);
 
         $apiKey = (string) config('app.chat_gpt_api_key');
         if ($apiKey === '') {
@@ -405,12 +416,9 @@ class ChatMealPlanService
         int $mealsPerDay
     ): array
     {
-        $configData = is_array($config->data ?? null) ? $config->data : [];
-        $configLocation = is_array($configData['location'] ?? null) ? $configData['location'] : [];
-
-        $country = $locationContext['country'] ?? $configLocation['country'] ?? ($configData['country'] ?? null);
-        $state = $locationContext['state'] ?? $configLocation['state'] ?? ($configData['state'] ?? null);
-        $city = $locationContext['city'] ?? $configLocation['city'] ?? ($configData['city'] ?? null);
+        $country = $locationContext['country'] ?? null;
+        $state = $locationContext['state'] ?? null;
+        $city = $locationContext['city'] ?? null;
 
         $country = isset($country) ? trim((string) $country) : null;
         $state = isset($state) ? trim((string) $state) : null;
@@ -420,14 +428,18 @@ class ChatMealPlanService
         $state = $state !== '' ? $state : null;
         $city = $city !== '' ? $city : null;
 
-        $permission = $locationContext['permission']
-            ?? ($configLocation['permission'] ?? 'unknown');
+        $configData = is_array($config->data ?? null) ? $config->data : [];
+        $answers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
 
-        $source = $locationContext['source']
-            ?? ($configLocation['source'] ?? 'database');
-
-        $latitude = $locationContext['latitude'] ?? ($configLocation['latitude'] ?? null);
-        $longitude = $locationContext['longitude'] ?? ($configLocation['longitude'] ?? null);
+        $dietPreference = $profile->diet_preference;
+        $allergies = $answers['allergies'] ?? ($configData['allergies'] ?? 'None');
+        $foodPref = $answers['food_pref'] ?? ($configData['food_pref'] ?? 'None');
+        $mealsPerDayString = $answers['meals_per_day'] ?? ($configData['meals_per_day'] ?? '3 meals');
+        $prepStyle = $answers['prep_style'] ?? ($configData['prep_style'] ?? 'None');
+        $appliances = $answers['appliances'] ?? ($configData['appliances'] ?? 'Stove & Oven');
+        $cookingTime = $answers['cooking_time'] ?? ($configData['cooking_time'] ?? 'Anytime');
+        $targetCalorieString = $answers['target_calorie'] ?? ($configData['target_calorie'] ?? '2000 kcal');
+        $healthGoal = $answers['health_goal'] ?? ($configData['health_goal'] ?? 'None');
 
         return [
             'date' => $planDate,
@@ -436,26 +448,9 @@ class ChatMealPlanService
                 'providedIngredients' => $providedIngredients,
             ],
             'location_context' => [
-                'permission' => $permission,
-                'source' => $source,
                 'country' => $country,
                 'state' => $state,
                 'city' => $city,
-                'latitude' => $latitude,
-                'longitude' => $longitude,
-                'suggestion_guidance' => [
-                    'if_country_selected_then_suggest_only_that_country_states' => true,
-                    'if_state_selected_then_suggest_only_that_state_cities' => true,
-                    'india_example' => [
-                        'country' => 'India',
-                        'states_only_from_india' => true,
-                    ],
-                ],
-                'fallback_guidance' => [
-                    'prefer_current_location_when_permission_granted' => true,
-                    'if_no_location_permission_use_user_selected_country_state_city' => true,
-                    'if_missing_location_use_config_or_neutral_regional_assumptions' => true,
-                ],
             ],
             'user' => [
                 'id' => $user->id,
@@ -469,9 +464,20 @@ class ChatMealPlanService
                 'height_cm' => $profile->height_cm,
                 'weight_kg' => $profile->weight_kg,
                 'target_weight_kg' => $profile->target_weight_kg,
-                'diet_preference' => $profile->diet_preference,
+                'diet_preference' => $dietPreference,
             ],
-            'config' => $config->data ?? [],
+            'config' => [
+                'allergies' => $allergies,
+                'food_preference' => $foodPref,
+                'meals_per_day' => $mealsPerDayString,
+                'prep_style' => $prepStyle,
+                'appliances' => $appliances,
+                'cooking_time' => $cookingTime,
+                'target_calorie' => $targetCalorieString,
+                'health_goal' => $healthGoal,
+                'diet_preference' => $dietPreference,
+                'raw_config_data' => $configData,
+            ],
             'calorie_target' => $calorieTarget,
             'meals_per_day' => $mealsPerDay,
         ];
@@ -480,30 +486,48 @@ class ChatMealPlanService
     /**
      * System prompt with strict response schema.
      */
-    private function buildSystemPrompt(int $mealsPerDay, int $calorieTarget, bool $isIngredientMode = false): string
+    private function buildSystemPrompt(
+        int $mealsPerDay,
+        int $calorieTarget,
+        bool $isIngredientMode = false,
+        array $preferences = []
+    ): string
     {
+        $allergies = $preferences['allergies'] ?? 'None';
+        $foodPref = $preferences['food_preference'] ?? 'None';
+        $dietPref = $preferences['diet_preference'] ?? 'None';
+        $prepStyle = $preferences['prep_style'] ?? 'None';
+        $appliances = $preferences['appliances'] ?? 'None';
+        $cookingTime = $preferences['cooking_time'] ?? 'None';
+        $healthGoal = $preferences['health_goal'] ?? 'None';
+
+        $allergyInstruction = '';
+        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
+            $allergyInstruction = "\n- CRITICAL SAFETY RULE: The user has the following allergies: **{$allergies}**. You MUST NOT recommend or include any ingredients, foods, dishes, or products containing or derived from: **{$allergies}**. This allergy constraint has the absolute highest priority. Double-check all ingredients and steps to ensure complete compliance.\n";
+        }
+
         if ($isIngredientMode) {
             return <<<PROMPT
 Generate a practical 1-day meal plan from profile + config + provided ingredients.
 
 Location rules:
-- Use `location_context` to localize cuisine, ingredient availability, and meal style.
-- If `location_context.permission = granted` and GPS/location fields are present, prioritize that location.
-- If permission is denied/unavailable, use user-provided country/state/city from `location_context`.
-- Apply suggestion logic semantics from payload:
-    - If country is selected (e.g., India), state suggestions should only belong to that country.
-    - If state is selected, city suggestions should only belong to that state.
-- If location is incomplete, fall back to config/profile and keep meals broadly regional-safe.
+- Use `location_context` to localize cuisine, ingredient availability, and meal style using the provided country, state, and city.
+- If location is incomplete or missing, fall back to regional-neutral assumptions or keep meals broadly regional-safe.
 
 You MUST prioritize the provided ingredients and suggest meals that can be made using them.
 Also identify additional missing ingredients needed to complete cooking.
 
 Strict Diet & Calorie Constraints:
-- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
+$allergyInstruction- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
 - The total calories of all generated meals combined MUST sum up exactly to $calorieTarget kcal (tolerance: ±10 kcal).
 - Distribute the calories logically across the $mealsPerDay meals (e.g. Breakfast, Lunch, Dinner, Snack).
 - Each meal object's "calories" key must be a valid integer.
-- The meals must strictly follow user allergies (allergy safety has highest priority), diet/food preferences, prep style, kitchen appliances, and cooking time limits from config.
+- The meals must strictly follow the following user preferences:
+    - Diet/Food Preference: $foodPref (Diet preference: $dietPref)
+    - Prep Style: $prepStyle
+    - Kitchen Appliances: $appliances
+    - Cooking Time: $cookingTime
+    - Health Goal: $healthGoal
 
 Output JSON only (no markdown/text) with exactly these top keys:
 1) meals: array of meal objects with keys
@@ -524,20 +548,20 @@ PROMPT;
 Generate a practical 1-day meal plan from profile + config.
 
 Location rules:
-- Use `location_context` to localize cuisine, ingredient availability, and meal style.
-- If `location_context.permission = granted` and GPS/location fields are present, prioritize that location.
-- If permission is denied/unavailable, use user-provided country/state/city from `location_context`.
-- Apply suggestion logic semantics from payload:
-    - If country is selected (e.g., India), state suggestions should only belong to that country.
-    - If state is selected, city suggestions should only belong to that state.
-- If location is incomplete, fall back to config/profile and keep meals broadly regional-safe.
+- Use `location_context` to localize cuisine, ingredient availability, and meal style using the provided country, state, and city.
+- If location is incomplete or missing, fall back to regional-neutral assumptions or keep meals broadly regional-safe.
 
 Strict Diet & Calorie Constraints:
-- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
+$allergyInstruction- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
 - The total calories of all generated meals combined MUST sum up exactly to $calorieTarget kcal (tolerance: ±10 kcal).
 - Distribute the calories logically across the $mealsPerDay meals (e.g. Breakfast, Lunch, Dinner, Snack).
 - Each meal object's "calories" key must be a valid integer.
-- The meals must strictly follow user allergies (allergy safety has highest priority), diet/food preferences, prep style, kitchen appliances, and cooking time limits from config.
+- The meals must strictly follow the following user preferences:
+    - Diet/Food Preference: $foodPref (Diet preference: $dietPref)
+    - Prep Style: $prepStyle
+    - Kitchen Appliances: $appliances
+    - Cooking Time: $cookingTime
+    - Health Goal: $healthGoal
 
 Output JSON only (no markdown/text) with exactly these top keys:
 1) meals: array of meal objects with keys
@@ -814,6 +838,19 @@ PROMPT;
             default => 'Snack',
         };
 
+        $configData = is_array($config->data ?? null) ? $config->data : [];
+        $answers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
+
+        $dietPreference = $profile->diet_preference;
+        $allergies = $answers['allergies'] ?? ($configData['allergies'] ?? 'None');
+        $foodPref = $answers['food_pref'] ?? ($configData['food_pref'] ?? 'None');
+        $mealsPerDayString = $answers['meals_per_day'] ?? ($configData['meals_per_day'] ?? '3 meals');
+        $prepStyle = $answers['prep_style'] ?? ($configData['prep_style'] ?? 'None');
+        $appliances = $answers['appliances'] ?? ($configData['appliances'] ?? 'Stove & Oven');
+        $cookingTime = $answers['cooking_time'] ?? ($configData['cooking_time'] ?? 'Anytime');
+        $targetCalorieString = $answers['target_calorie'] ?? ($configData['target_calorie'] ?? '2000 kcal');
+        $healthGoal = $answers['health_goal'] ?? ($configData['health_goal'] ?? 'None');
+
         $prompt = [
             'meal_id' => $meal->id,
             'meal_type' => $mealType,
@@ -832,14 +869,30 @@ PROMPT;
                 'height_cm' => $profile->height_cm,
                 'weight_kg' => $profile->weight_kg,
                 'target_weight_kg' => $profile->target_weight_kg,
-                'diet_preference' => $profile->diet_preference,
+                'diet_preference' => $dietPreference,
             ],
-            'config' => $config->data ?? [],
+            'config' => [
+                'allergies' => $allergies,
+                'food_preference' => $foodPref,
+                'meals_per_day' => $mealsPerDayString,
+                'prep_style' => $prepStyle,
+                'appliances' => $appliances,
+                'cooking_time' => $cookingTime,
+                'target_calorie' => $targetCalorieString,
+                'health_goal' => $healthGoal,
+                'diet_preference' => $dietPreference,
+                'raw_config_data' => $configData,
+            ],
         ];
 
+        $allergyInstruction = '';
+        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
+            $allergyInstruction = " CRITICAL SAFETY RULE: The user has the following allergies: {$allergies}. You MUST NOT recommend or include any ingredients, foods, dishes, or products containing or derived from: {$allergies}. This allergy constraint has the absolute highest priority. Double-check all ingredients and steps to ensure complete compliance.";
+        }
+
         $systemPrompt = $isIngredientMode
-            ? "Generate exactly one {$mealLabel} meal using the provided ingredients. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object."
-            : "Generate exactly one {$mealLabel} meal. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object.";
+            ? "Generate exactly one {$mealLabel} meal using the provided ingredients. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object. The meal must strictly adhere to the following user preferences: Food Preference: {$foodPref}, Diet Preference: {$dietPreference}, Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking Time: {$cookingTime}, Health Goal: {$healthGoal}.{$allergyInstruction}"
+            : "Generate exactly one {$mealLabel} meal. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object. The meal must strictly adhere to the following user preferences: Food Preference: {$foodPref}, Diet Preference: {$dietPreference}, Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking Time: {$cookingTime}, Health Goal: {$healthGoal}.{$allergyInstruction}";
 
         $response = Http::timeout(90)
             ->withHeaders([

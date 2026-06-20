@@ -36,18 +36,6 @@ class ChatController extends Controller
             'refresh' => 'nullable|boolean',
             'isIngredients' => 'nullable|boolean',
             'ingredients' => 'nullable|array',
-            'ingridients' => 'nullable|array',
-            'location_permission' => 'nullable|in:granted,denied,prompt,unknown',
-            'location_source' => 'nullable|in:gps,user_input,database,unknown',
-            'country' => 'nullable|string|max:100',
-            'state' => 'nullable|string|max:100',
-            'city' => 'nullable|string|max:100',
-            'location' => 'nullable|array',
-            'location.country' => 'nullable|string|max:100',
-            'location.state' => 'nullable|string|max:100',
-            'location.city' => 'nullable|string|max:100',
-            'location.latitude' => 'nullable|numeric|between:-90,90',
-            'location.longitude' => 'nullable|numeric|between:-180,180',
         ]);
 
         $user = auth()->user();
@@ -60,43 +48,21 @@ class ChatController extends Controller
 
         $providedIngredients = $validated['ingredients'] ?? $validated['ingridients'] ?? [];
 
-        $locationInput = $validated['location'] ?? [];
+        // Retrieve location context (country, state, city) strictly from config JSON.
+        $config = UserConfig::where('user_id', $user->id)->first();
+        $configData = is_array($config?->data) ? $config->data : [];
+        $configLocation = is_array($configData['location'] ?? null) ? $configData['location'] : [];
+        $configAnswers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
+
+        $country = $configLocation['country'] ?? ($configAnswers['country'] ?? ($configData['country'] ?? null));
+        $state = $configLocation['state'] ?? ($configAnswers['state'] ?? ($configData['state'] ?? null));
+        $city = $configLocation['city'] ?? ($configAnswers['city'] ?? ($configData['city'] ?? null));
+
         $locationContext = [
-            'permission' => $validated['location_permission'] ?? 'unknown',
-            'source' => $validated['location_source'] ?? 'unknown',
-            'country' => $locationInput['country'] ?? ($validated['country'] ?? null),
-            'state' => $locationInput['state'] ?? ($validated['state'] ?? null),
-            'city' => $locationInput['city'] ?? ($validated['city'] ?? null),
-            'latitude' => $locationInput['latitude'] ?? null,
-            'longitude' => $locationInput['longitude'] ?? null,
+            'country' => $country ? trim((string) $country) : null,
+            'state' => $state ? trim((string) $state) : null,
+            'city' => $city ? trim((string) $city) : null,
         ];
-
-        // Persist explicit user location input for future fallback (non-breaking merge into user_config.data).
-        $hasLocationInput = filled($locationContext['country'])
-            || filled($locationContext['state'])
-            || filled($locationContext['city'])
-            || !is_null($locationContext['latitude'])
-            || !is_null($locationContext['longitude']);
-
-        if ($hasLocationInput) {
-            $existingConfig = UserConfig::where('user_id', $user->id)->first();
-            $existingData = is_array($existingConfig?->data) ? $existingConfig->data : [];
-
-            $existingData['location'] = array_filter([
-                'country' => $locationContext['country'],
-                'state' => $locationContext['state'],
-                'city' => $locationContext['city'],
-                'latitude' => $locationContext['latitude'],
-                'longitude' => $locationContext['longitude'],
-                'permission' => $locationContext['permission'],
-                'source' => $locationContext['source'],
-            ], fn ($value) => !is_null($value) && $value !== '');
-
-            UserConfig::updateOrCreate(
-                ['user_id' => $user->id],
-                ['data' => $existingData]
-            );
-        }
 
         $result = $this->mealPlanService->generateAndSave(
             $user,
@@ -174,9 +140,6 @@ class ChatController extends Controller
         $validated = $request->validate([
             'isIngredients' => 'nullable|boolean',
             'ingredients' => 'nullable|array',
-            'country' => 'nullable|string|max:100',
-            'state' => 'nullable|string|max:100',
-            'city' => 'nullable|string|max:100',
         ]);
 
 
@@ -206,10 +169,21 @@ class ChatController extends Controller
         );
 
         $providedIngredients = $validated['ingredients'] ?? [];
+
+        // Retrieve location context (country, state, city) strictly from config JSON.
+        $config = UserConfig::where('user_id', $user->id)->first();
+        $configData = is_array($config?->data) ? $config->data : [];
+        $configLocation = is_array($configData['location'] ?? null) ? $configData['location'] : [];
+        $configAnswers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
+
+        $country = $configLocation['country'] ?? ($configAnswers['country'] ?? ($configData['country'] ?? null));
+        $state = $configLocation['state'] ?? ($configAnswers['state'] ?? ($configData['state'] ?? null));
+        $city = $configLocation['city'] ?? ($configAnswers['city'] ?? ($configData['city'] ?? null));
+
         $locationContext = [
-            'country' => $validated['country'] ?? null,
-            'state' => $validated['state'] ?? null,
-            'city' => $validated['city'] ?? null,
+            'country' => $country ? trim((string) $country) : null,
+            'state' => $state ? trim((string) $state) : null,
+            'city' => $city ? trim((string) $city) : null,
         ];
 
         $result = $this->mealPlanService->refreshSingleMealById(
