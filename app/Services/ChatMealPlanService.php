@@ -6,14 +6,25 @@ use App\Models\DailyDietPlans;
 use App\Models\User;
 use App\Models\UserConfig;
 use App\Models\UserProfile;
+use App\Services\MealPlan\AllergyManager;
+use App\Services\MealPlan\MealPlanNormalizer;
+use App\Services\MealPlan\PromptBuilder;
+use App\Services\MealPlan\MealPlanRepository;
+use App\Services\MealPlan\AiMealGenerator;
 use Carbon\Carbon;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Log;
 
 class ChatMealPlanService
 {
-    private const ALLOWED_MEAL_TYPES = ['breakfast', 'lunch', 'snacks', 'dinner'];
+    public function __construct(
+        protected AllergyManager $allergyManager,
+        protected MealPlanNormalizer $normalizer,
+        protected PromptBuilder $promptBuilder,
+        protected MealPlanRepository $repository,
+        protected AiMealGenerator $generator
+    ) {
+    }
 
     /**
      * Generate daily meal plan with refresh logic and persist into existing table.
@@ -30,9 +41,8 @@ class ChatMealPlanService
         bool $isIngredientMode = false,
         array $providedIngredients = [],
         array $locationContext = []
-    ): array
-    {
-        set_time_limit(300); 
+    ): array {
+        set_time_limit(300);
         Log::info('Meal plan service started', [
             'user_id' => $user->id,
             'date' => $date,
@@ -54,13 +64,7 @@ class ChatMealPlanService
 
         $planDate = $date ? Carbon::parse($date)->toDateString() : now()->toDateString();
 
-        $activePlans = DailyDietPlans::query()
-            ->where('user_id', $user->id)
-            ->where('date', $planDate)
-            ->where('is_active', true)
-            ->whereIn('meal_type', self::ALLOWED_MEAL_TYPES)
-            ->orderBy('created_at')
-            ->get();
+        $activePlans = $this->repository->getActivePlansForDate($user->id, $planDate);
 
         if (!$refresh && $activePlans->isNotEmpty()) {
             Log::info('Meal plan served from database', [
@@ -69,7 +73,7 @@ class ChatMealPlanService
                 'meal_count' => $activePlans->count(),
             ]);
 
-            $aggregated = $this->aggregatePlans($activePlans, $planDate);
+            $aggregated = $this->repository->aggregatePlans($activePlans, $planDate);
 
             return [
                 'status' => true,
@@ -108,7 +112,7 @@ class ChatMealPlanService
             ];
         }
 
-        $normalizedProvidedIngredients = $this->normalizeProvidedIngredients($providedIngredients);
+        $normalizedProvidedIngredients = $this->normalizer->normalizeProvidedIngredients($providedIngredients);
 
         if ($isIngredientMode && count($normalizedProvidedIngredients) === 0) {
             Log::warning('Meal plan service aborted: ingredient mode without ingredients', [
@@ -135,7 +139,7 @@ class ChatMealPlanService
         preg_match('/\d+/', (string) $mealsPerDayString, $mealsMatches);
         $mealsPerDay = isset($mealsMatches[0]) ? (int) $mealsMatches[0] : 3;
 
-        $promptPayload = $this->buildPromptPayload(
+        $promptPayload = $this->promptBuilder->buildPromptPayload(
             $user,
             $profile,
             $config,
@@ -158,7 +162,7 @@ class ChatMealPlanService
             'health_goal' => $answers['health_goal'] ?? ($configData['health_goal'] ?? 'None'),
         ];
 
-        $systemPrompt = $this->buildSystemPrompt($mealsPerDay, $calorieTarget, $isIngredientMode, $preferences);
+        $systemPrompt = $this->promptBuilder->buildSystemPrompt($mealsPerDay, $calorieTarget, $isIngredientMode, $preferences);
 
         $apiKey = (string) config('app.chat_gpt_api_key');
         if ($apiKey === '') {
@@ -173,120 +177,41 @@ class ChatMealPlanService
             ];
         }
 
-        $model = (string) config('app.chat_gpt_model', 'gpt-4o-mini');
-
         $userMessage = 'Generate my personalized meal plan from this user payload: ' . json_encode($promptPayload);
         if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
-            $parsedAllergies = $this->parseAllergies($allergies);
+            $parsedAllergies = $this->allergyManager->parseAllergies($allergies);
             if (!empty($parsedAllergies)) {
-                $userMessage .= "\n\nCRITICAL SAFETY RULE: The user is severely allergic to: " . implode(', ', $parsedAllergies) . ". You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items. Double-check all generated meal names, ingredients, and steps to ensure absolute compliance.";
+                $derivatives = $this->allergyManager->getAllergyDerivatives($parsedAllergies);
+                $userMessage .= "\n\nCRITICAL SAFETY RULE: The user is severely allergic to: " . implode(', ', $parsedAllergies) . ". You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items (such as: " . implode(', ', $derivatives) . "). Double-check all generated meal names, ingredients, and steps to ensure absolute compliance.";
             }
         }
 
-        $response = Http::timeout(90)
-            ->withHeaders([
-                'Authorization' => 'Bearer ' . $apiKey,
-            ])
-            ->post('https://api.openai.com/v1/chat/completions', [
-                'model' => $model,
-                'messages' => [
-                    ['role' => 'system', 'content' => $systemPrompt],
-                    [
-                        'role' => 'user',
-                        'content' => $userMessage,
-                    ],
-                ],
-                'response_format' => ['type' => 'json_object'],
-            ]);
+        $result = $this->generator->generateMeals($user->id, $systemPrompt, $userMessage, $allergies);
 
-        Log::info('OpenAI meal plan response received', [
-            'user_id' => $user->id,
-            'status' => $response->status(),
-            'successful' => $response->successful(),
-        ]);
-
-        if (!$response->successful()) {
-            Log::error('OpenAI meal plan request failed', [
-                'user_id' => $user->id,
-                'status' => $response->status(),
-                'error' => $response->json('error.message'),
-            ]);
-
+        if (!$result['success']) {
             return [
                 'status' => false,
-                'message' => $response->json('error.message') ?? 'Failed to generate meal plan.',
-                'code' => $response->status() ?: 500,
+                'message' => $result['message'],
+                'code' => $result['code'],
             ];
         }
 
-        $rawContent = (string) data_get($response->json(), 'choices.0.message.content', '');
-        $decoded = json_decode($rawContent, true);
+        $decoded = $result['decoded'];
+        $meals = $result['meals'];
 
-        if (!is_array($decoded)) {
-            Log::error('OpenAI meal plan returned invalid JSON', [
-                'user_id' => $user->id,
-            ]);
-
-            return [
-                'status' => false,
-                'message' => 'Invalid AI response JSON.',
-                'code' => 500,
-            ];
-        }
-
-        $meals = $this->normalizeMeals($decoded);
-        if (count($meals) === 0) {
-            Log::error('OpenAI meal plan response contained no meals', [
-                'user_id' => $user->id,
-            ]);
-
-            return [
-                'status' => false,
-                'message' => 'AI response did not contain meals.',
-                'code' => 500,
-            ];
-        }
-
-        // Validate allergies in the generated response
-        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
-            $parsedAllergies = $this->parseAllergies($allergies);
-            $allergyChecks = $this->getAllergyDerivatives($parsedAllergies);
-            foreach ($meals as $meal) {
-                $mealText = strtolower(($meal['name'] ?? '') . ' ' . implode(' ', $meal['ingredients'] ?? []) . ' ' . implode(' ', $meal['steps'] ?? []));
-                foreach ($allergyChecks as $allergy) {
-                    if (str_contains($mealText, strtolower($allergy))) {
-                        Log::error('AI generated meal violated allergy constraint', [
-                            'user_id' => $user->id,
-                            'allergy' => $allergy,
-                            'meal_name' => $meal['name'] ?? 'Unknown',
-                        ]);
-                        return [
-                            'status' => false,
-                            'message' => "AI generated meal plan contains allergic ingredient or derivative: {$allergy}. Please try generating again.",
-                            'code' => 422,
-                        ];
-                    }
-                }
-            }
-        }
-
-        $groceryRequirements = $this->normalizeGroceryRequirements($decoded, $meals);
+        $groceryRequirements = $this->normalizer->normalizeGroceryRequirements($decoded, $meals);
 
         // If refresh was requested, deactivate old active records first.
         if ($refresh) {
-            DailyDietPlans::query()
-                ->where('user_id', $user->id)
-                ->where('date', $planDate)
-                ->where('is_active', true)
-                ->whereIn('meal_type', self::ALLOWED_MEAL_TYPES)
-                ->update(['is_active' => false]);
+            $this->repository->deactivateActivePlans($user->id, $planDate);
         }
 
         // Store one row per meal because DB check-constraint allows only fixed meal_type values.
         $createdRows = collect();
+        $model = (string) config('app.chat_gpt_model', 'gpt-4o-mini');
 
         foreach ($meals as $meal) {
-            $mealType = $this->resolveMealType((string) ($meal['mealType'] ?? 'snacks'));
+            $mealType = $this->repository->resolveMealType((string) ($meal['mealType'] ?? 'snacks'));
 
             $storedPayload = [
                 'meal' => $meal,
@@ -305,7 +230,7 @@ class ChatMealPlanService
                 ],
             ];
 
-            $createdRows->push(DailyDietPlans::create([
+            $createdRows->push($this->repository->createPlan([
                 'user_id' => $user->id,
                 'date' => $planDate,
                 'meal_type' => $mealType,
@@ -315,7 +240,7 @@ class ChatMealPlanService
             ]));
         }
 
-        $aggregated = $this->aggregatePlans($createdRows, $planDate);
+        $aggregated = $this->repository->aggregatePlans($createdRows, $planDate);
 
         return [
             'status' => true,
@@ -334,518 +259,21 @@ class ChatMealPlanService
             return null;
         }
 
-        $query = DailyDietPlans::query()
-            ->where('user_id', $user->id)
-            ->where('is_active', true)
-            ->whereIn('meal_type', self::ALLOWED_MEAL_TYPES);
-
         if ($date) {
-            $query->where('date', Carbon::parse($date)->toDateString());
-            $rows = $query->orderBy('created_at')->get();
+            $planDate = Carbon::parse($date)->toDateString();
+            $rows = $this->repository->getActivePlansForDate($user->id, $planDate);
 
-            return $rows->isEmpty() ? null : $this->aggregatePlans($rows, Carbon::parse($date)->toDateString());
+            return $rows->isEmpty() ? null : $this->repository->aggregatePlans($rows, $planDate);
         }
 
-        $latest = (clone $query)->latest('date')->first();
+        $latest = $this->repository->getLatestActivePlan($user->id);
         if (!$latest) {
             return null;
         }
 
-        $rows = (clone $query)
-            ->where('date', $latest->date)
-            ->orderBy('created_at')
-            ->get();
+        $rows = $this->repository->getActivePlansForDate($user->id, (string) $latest->date);
 
-        return $rows->isEmpty() ? null : $this->aggregatePlans($rows, (string) $latest->date);
-    }
-
-    /**
-     * Convert a human meal label to DB-allowed meal_type enum/check values.
-     */
-    private function resolveMealType(string $mealType): string
-    {
-        $normalized = strtolower(trim($mealType));
-
-        if (str_contains($normalized, 'breakfast')) {
-            return 'breakfast';
-        }
-
-        if (str_contains($normalized, 'lunch')) {
-            return 'lunch';
-        }
-
-        if (str_contains($normalized, 'dinner')) {
-            return 'dinner';
-        }
-
-        return 'snacks';
-    }
-
-    /**
-     * Build a single API payload from multiple meal rows.
-     */
-    private function aggregatePlans($rows, string $date): array
-    {
-        $meals = [];
-        $groceryRequirements = [];
-        $firstId = null;
-
-        foreach ($rows as $row) {
-            $response = is_array($row->response) ? $row->response : [];
-            $firstId ??= $row->id;
-
-            // New format: one meal per row.
-            if (isset($response['meal']) && is_array($response['meal'])) {
-                $meals[] = $response['meal'];
-            }
-
-            // Backward compatibility: old format had full meals array in each row.
-            if (isset($response['meals']) && is_array($response['meals'])) {
-                foreach ($response['meals'] as $meal) {
-                    if (is_array($meal)) {
-                        $meals[] = $meal;
-                    }
-                }
-            }
-
-            if (empty($groceryRequirements) && isset($response['groceryRequirements']) && is_array($response['groceryRequirements'])) {
-                $groceryRequirements = $response['groceryRequirements'];
-            }
-        }
-
-        // De-duplicate meals by id+name while preserving order.
-        $seen = [];
-        $uniqueMeals = [];
-        foreach ($meals as $meal) {
-            $key = (($meal['id'] ?? '') . '|' . ($meal['name'] ?? ''));
-            if (!isset($seen[$key])) {
-                $seen[$key] = true;
-                $uniqueMeals[] = $meal;
-            }
-        }
-
-        return [
-            'plan_id' => $firstId,
-            'date' => $date,
-            'mealType' => 'daily_plan',
-            'meals' => $uniqueMeals,
-            'groceryRequirements' => $groceryRequirements,
-        ];
-    }
-
-    /**
-     * Build a compact payload used in prompt generation.
-     */
-    private function buildPromptPayload(
-        User $user,
-        UserProfile $profile,
-        UserConfig $config,
-        string $planDate,
-        bool $isIngredientMode,
-        array $providedIngredients,
-        array $locationContext,
-        int $calorieTarget,
-        int $mealsPerDay
-    ): array
-    {
-        $country = $locationContext['country'] ?? null;
-        $state = $locationContext['state'] ?? null;
-        $city = $locationContext['city'] ?? null;
-
-        $country = isset($country) ? trim((string) $country) : null;
-        $state = isset($state) ? trim((string) $state) : null;
-        $city = isset($city) ? trim((string) $city) : null;
-
-        $country = $country !== '' ? $country : null;
-        $state = $state !== '' ? $state : null;
-        $city = $city !== '' ? $city : null;
-
-        $configData = is_array($config->data ?? null) ? $config->data : [];
-        $answers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
-
-        $dietPreference = $profile->diet_preference;
-        $allergies = $answers['allergies'] ?? ($configData['allergies'] ?? 'None');
-        $foodPref = $answers['food_pref'] ?? ($configData['food_pref'] ?? 'None');
-        $mealsPerDayString = $answers['meals_per_day'] ?? ($configData['meals_per_day'] ?? '3 meals');
-        $prepStyle = $answers['prep_style'] ?? ($configData['prep_style'] ?? 'None');
-        $appliances = $answers['appliances'] ?? ($configData['appliances'] ?? 'Stove & Oven');
-        $cookingTime = $answers['cooking_time'] ?? ($configData['cooking_time'] ?? 'Anytime');
-        $targetCalorieString = $answers['target_calorie'] ?? ($configData['target_calorie'] ?? '2000 kcal');
-        $healthGoal = $answers['health_goal'] ?? ($configData['health_goal'] ?? 'None');
-
-        return [
-            'date' => $planDate,
-            'ingredient_context' => [
-                'isIngredientMode' => $isIngredientMode,
-                'providedIngredients' => $providedIngredients,
-            ],
-            'location_context' => [
-                'country' => $country,
-                'state' => $state,
-                'city' => $city,
-            ],
-            'user' => [
-                'id' => $user->id,
-                'email' => $user->email,
-                'phone_number' => $user->phone_number,
-            ],
-            'profile' => [
-                'full_name' => $profile->full_name,
-                'gender' => $profile->gender,
-                'age' => $profile->age,
-                'height_cm' => $profile->height_cm,
-                'weight_kg' => $profile->weight_kg,
-                'target_weight_kg' => $profile->target_weight_kg,
-                'diet_preference' => $dietPreference,
-            ],
-            'config' => [
-                'allergies' => $allergies,
-                'food_preference' => $foodPref,
-                'meals_per_day' => $mealsPerDayString,
-                'prep_style' => $prepStyle,
-                'appliances' => $appliances,
-                'cooking_time' => $cookingTime,
-                'target_calorie' => $targetCalorieString,
-                'health_goal' => $healthGoal,
-                'diet_preference' => $dietPreference,
-                'raw_config_data' => $configData,
-            ],
-            'calorie_target' => $calorieTarget,
-            'meals_per_day' => $mealsPerDay,
-        ];
-    }
-
-    /**
-     * System prompt with strict response schema (optimized).
-     * 
-     * Prompt Size / Token Estimate comparison:
-     * - Old Prompt size: ~1,775 characters (approx. 335 tokens)
-     * - New Prompt size: ~1,120 characters (approx. 215 tokens)
-     * - Percentage Reduction: ~37%
-     */
-    private function buildSystemPrompt(
-        int $mealsPerDay,
-        int $calorieTarget,
-        bool $isIngredientMode = false,
-        array $preferences = []
-    ): string
-    {
-        $allergies = $preferences['allergies'] ?? 'None';
-        $foodPref = $preferences['food_preference'] ?? 'None';
-        $dietPref = $preferences['diet_preference'] ?? 'None';
-        $prepStyle = $preferences['prep_style'] ?? 'None';
-        $appliances = $preferences['appliances'] ?? 'None';
-        $cookingTime = $preferences['cooking_time'] ?? 'None';
-        $healthGoal = $preferences['health_goal'] ?? 'None';
-
-        $allergyInstruction = $this->buildAllergyInstruction($allergies);
-        $allergyBlock = $allergyInstruction ? "{$allergyInstruction}\n" : '';
-
-        $ingredientHeader = $isIngredientMode ? ' + provided ingredients' : '';
-
-        $modeSpecificRules = $isIngredientMode
-            ? "- Prioritize provided ingredients; suggest meals that can be made using them.\n- groceryRequirements must contain additional/missing ingredients needed; do not include ingredients already available.\n- Use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments)."
-            : "- Main meals should usually have 5+ ingredients and clear steps.\n- groceryRequirements must be consolidated for the day, include oils/spices/sauces, merge duplicates, and use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).";
-
-        return <<<PROMPT
-{$allergyBlock}Generate a 1-day meal plan from profile + config{$ingredientHeader}.
-
-Localize cuisine/style via `location_context` (country, state, city) if available, else keep regional-safe.
-
-Constraints:
-- Target: Exactly {$mealsPerDay} meals.
-- Daily calories: Combined sum MUST equal {$calorieTarget} kcal (tolerance: ±10).
-- Calories: Distribute logically (e.g. Breakfast, Lunch, Dinner, Snack) with integer value.
-- Preferences: Diet/Food: {$foodPref} (Diet: {$dietPref}), Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking: {$cookingTime}, Goal: {$healthGoal}.
-
-Output JSON only (no markdown/text) with exactly these keys:
-1) meals: array of meal objects with keys: id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags (array of strings), ingredients (array of strings), steps (array of strings).
-2) groceryRequirements: array of objects with keys: item, quantity, category.
-
-Rules:
-- Meals count in array: exactly {$mealsPerDay}.
-{$modeSpecificRules}
-- Keep meals realistic for home cooking and nutritionally aligned to goal.
-PROMPT;
-    }
-
-    /**
-     * Parse and format the allergy string into a highly explicit bulleted exclusion list for the system prompt.
-     */
-    private function buildAllergyInstruction(?string $allergies): string
-    {
-        if (blank($allergies) || strtolower(trim($allergies)) === 'none') {
-            return '';
-        }
-
-        $parsed = $this->parseAllergies($allergies);
-        if (empty($parsed)) {
-            return '';
-        }
-
-        $bulletList = '';
-        foreach ($parsed as $item) {
-            $bulletList .= "\n  * {$item}";
-        }
-
-        return "\n- CRITICAL SAFETY RULE: The user is severely allergic to the following items:{$bulletList}\n  You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items (e.g. if allergic to egg, do not recommend omelettes or scramble). This allergy constraint has the absolute highest priority. Double-check all ingredients, steps, and meal names to ensure complete safety and compliance.\n";
-    }
-
-    /**
-     * Helper to decompose comma and space separated allergy inputs into clean distinct keywords/phrases.
-     */
-    private function parseAllergies(string $allergies): array
-    {
-        $terms = [];
-        $segments = explode(',', $allergies);
-        foreach ($segments as $segment) {
-            $segment = trim($segment);
-            if ($segment === '') {
-                continue;
-            }
-            $terms[] = $segment;
-            
-            $words = preg_split('/\s+/', $segment);
-            if (count($words) > 1) {
-                foreach ($words as $word) {
-                    $word = trim($word);
-                    if ($word !== '') {
-                        $terms[] = $word;
-                    }
-                }
-            }
-        }
-        
-        $ignoredWords = ['and', 'or', 'none', 'no', 'free', 'allergy', 'allergies'];
-        $uniqueTerms = [];
-        foreach ($terms as $term) {
-            $lower = strtolower($term);
-            if (in_array($lower, $ignoredWords, true)) {
-                continue;
-            }
-            $uniqueTerms[$lower] = $term;
-        }
-        
-        return array_values($uniqueTerms);
-    }
-
-    /**
-     * Map allergy keywords to common synonyms, products, or derivatives.
-     */
-    private function getAllergyDerivatives(array $allergies): array
-    {
-        $derivatives = [];
-        $map = [
-            'egg' => ['egg', 'eggs', 'omelette', 'omelet', 'scramble', 'mayo', 'mayonnaise'],
-            'chicken' => ['chicken', 'poultry'],
-            'mutton' => ['mutton', 'lamb', 'goat'],
-            'milk' => ['milk', 'cheese', 'butter', 'yogurt', 'curd', 'paneer', 'cream', 'dairy', 'whey'],
-            'dairy' => ['milk', 'cheese', 'butter', 'yogurt', 'curd', 'paneer', 'cream', 'dairy', 'whey'],
-            'wheat' => ['wheat', 'gluten', 'flour', 'bread', 'pasta', 'semolina'],
-            'gluten' => ['wheat', 'gluten', 'flour', 'bread', 'pasta', 'semolina'],
-            'fish' => ['fish', 'salmon', 'tuna', 'cod', 'seafood'],
-            'seafood' => ['fish', 'salmon', 'tuna', 'cod', 'shrimp', 'prawn', 'lobster', 'crab', 'seafood'],
-            'peanut' => ['peanut', 'peanuts'],
-            'nut' => ['nut', 'nuts', 'almond', 'walnut', 'cashew', 'hazelnut', 'pistachio'],
-            'nuts' => ['nut', 'nuts', 'almond', 'walnut', 'cashew', 'hazelnut', 'pistachio'],
-            'soy' => ['soy', 'soya', 'tofu', 'tempeh'],
-            'beef' => ['beef', 'steak'],
-            'pork' => ['pork', 'bacon', 'ham'],
-        ];
-
-        foreach ($allergies as $allergy) {
-            $lowerAllergy = strtolower($allergy);
-            $derivatives[] = $lowerAllergy;
-            
-            // Check if we have mapped derivatives
-            foreach ($map as $key => $values) {
-                if (str_contains($lowerAllergy, $key) || str_contains($key, $lowerAllergy)) {
-                    $derivatives = array_merge($derivatives, $values);
-                }
-            }
-        }
-
-        return array_values(array_unique($derivatives));
-    }
-
-    /**
-     * Normalize provided ingredient payload into a clean list of ingredient names.
-     *
-     * Supports:
-     * - ["egg", "tomato"]
-     * - [{"name":"egg"}, {"item":"tomato"}]
-     * - {"egg": true, "tomato": false, "onion": true}
-     */
-    private function normalizeProvidedIngredients(array $providedIngredients): array
-    {
-        $result = [];
-
-        if (array_is_list($providedIngredients)) {
-            foreach ($providedIngredients as $entry) {
-                if (is_string($entry)) {
-                    $value = trim($entry);
-                    if ($value !== '') {
-                        $result[] = $value;
-                    }
-                    continue;
-                }
-
-                if (is_array($entry)) {
-                    $available = $entry['available'] ?? $entry['is_available'] ?? $entry['selected'] ?? true;
-                    if ($available === false || $available === 0 || $available === '0') {
-                        continue;
-                    }
-
-                    $name = trim((string) ($entry['name'] ?? $entry['item'] ?? $entry['ingredient'] ?? ''));
-                    if ($name !== '') {
-                        $result[] = $name;
-                    }
-                }
-            }
-        } else {
-            foreach ($providedIngredients as $key => $value) {
-                if (!is_string($key) || trim($key) === '') {
-                    continue;
-                }
-
-                if (is_bool($value)) {
-                    if ($value) {
-                        $result[] = trim($key);
-                    }
-                    continue;
-                }
-
-                if (is_numeric($value)) {
-                    if ((int) $value === 1) {
-                        $result[] = trim($key);
-                    }
-                    continue;
-                }
-
-                if (is_string($value)) {
-                    $truthy = in_array(strtolower(trim($value)), ['1', 'true', 'yes', 'y'], true);
-                    if ($truthy) {
-                        $result[] = trim($key);
-                    }
-                }
-            }
-        }
-
-        $unique = [];
-        $seen = [];
-        foreach ($result as $item) {
-            $clean = trim($item);
-            if ($clean === '') {
-                continue;
-            }
-
-            $k = mb_strtolower($clean);
-            if (!isset($seen[$k])) {
-                $seen[$k] = true;
-                $unique[] = $clean;
-            }
-        }
-
-        return $unique;
-    }
-
-    /**
-     * Normalize AI output to expected meal list shape.
-     */
-    private function normalizeMeals(array $decoded): array
-    {
-        $meals = [];
-
-        if (isset($decoded['meals']) && is_array($decoded['meals'])) {
-            $meals = $decoded['meals'];
-        } elseif (array_is_list($decoded)) {
-            $meals = $decoded;
-        }
-
-        $normalized = [];
-        $index = 1;
-
-        foreach ($meals as $meal) {
-            if (!is_array($meal)) {
-                continue;
-            }
-
-            $normalized[] = [
-                'id' => (string) ($meal['id'] ?? $index),
-                'mealType' => (string) ($meal['mealType'] ?? 'Meal'),
-                'time' => (string) ($meal['time'] ?? '12:00 PM'),
-                'name' => (string) ($meal['name'] ?? 'Custom Meal'),
-                'emoji' => (string) ($meal['emoji'] ?? '🍽️'),
-                'bgColor' => (string) ($meal['bgColor'] ?? '0xFFFFFFFF'),
-                'calories' => (int) ($meal['calories'] ?? 0),
-                'protein' => (string) ($meal['protein'] ?? '0g'),
-                'carbs' => (string) ($meal['carbs'] ?? '0g'),
-                'fat' => (string) ($meal['fat'] ?? '0g'),
-                'prepTime' => (string) ($meal['prepTime'] ?? '0 min'),
-                'tags' => array_values(array_filter(array_map(function ($v) {
-                    return is_string($v) ? $v : '';
-                }, $meal['tags'] ?? []), fn ($v) => $v !== '')),
-                'ingredients' => array_values(array_filter(array_map(function ($v) {
-                    if (is_string($v)) return $v;
-                    if (is_array($v)) return trim(($v['name'] ?? $v['item'] ?? '') . ' ' . ($v['amount'] ?? $v['quantity'] ?? ''));
-                    return '';
-                }, $meal['ingredients'] ?? []), fn ($v) => $v !== '')),
-                'steps' => array_values(array_filter(array_map(function ($v) {
-                    if (is_string($v)) return $v;
-                    if (is_array($v)) return (string) ($v['step'] ?? $v['text'] ?? $v['description'] ?? '');
-                    return '';
-                }, $meal['steps'] ?? []), fn ($v) => $v !== '')),
-            ];
-
-            $index++;
-        }
-
-        return $normalized;
-    }
-
-    /**
-     * Normalize grocery list; fallback to deriving from meal ingredients.
-     */
-    private function normalizeGroceryRequirements(array $decoded, array $meals): array
-    {
-        if (isset($decoded['groceryRequirements']) && is_array($decoded['groceryRequirements'])) {
-            $normalized = [];
-            foreach ($decoded['groceryRequirements'] as $item) {
-                if (!is_array($item)) {
-                    continue;
-                }
-
-                $normalized[] = [
-                    'item' => (string) ($item['item'] ?? ''),
-                    'quantity' => (string) ($item['quantity'] ?? 'As needed'),
-                    'category' => (string) ($item['category'] ?? 'General'),
-                ];
-            }
-
-            $normalized = array_values(array_filter($normalized, fn ($v) => $v['item'] !== ''));
-            if (count($normalized) > 0) {
-                return $normalized;
-            }
-        }
-
-        // Fallback: derive grocery requirements from unique ingredients.
-        $items = [];
-        foreach ($meals as $meal) {
-            foreach (($meal['ingredients'] ?? []) as $ingredient) {
-                $clean = trim((string) preg_replace('/^[^\p{L}\p{N}]+/u', '', $ingredient));
-                if ($clean === '') {
-                    continue;
-                }
-                $key = mb_strtolower($clean);
-                $items[$key] = [
-                    'item' => $clean,
-                    'quantity' => 'As needed',
-                    'category' => 'General',
-                ];
-            }
-        }
-
-        return array_values($items);
+        return $rows->isEmpty() ? null : $this->repository->aggregatePlans($rows, (string) $latest->date);
     }
 
     /**
@@ -857,8 +285,7 @@ PROMPT;
         bool $isIngredientMode = false,
         array $providedIngredients = [],
         array $locationContext = []
-    ): array
-    {
+    ): array {
         Log::info('Single meal refresh service started', [
             'user_id' => $user->id,
             'meal_id' => $mealId,
@@ -903,7 +330,7 @@ PROMPT;
             ];
         }
 
-        $normalizedIngredients = $this->normalizeProvidedIngredients($providedIngredients);
+        $normalizedIngredients = $this->normalizer->normalizeProvidedIngredients($providedIngredients);
 
         if ($isIngredientMode && count($normalizedIngredients) === 0) {
             return [
@@ -977,7 +404,7 @@ PROMPT;
             ],
         ];
 
-        $allergyInstruction = $this->buildAllergyInstruction($allergies);
+        $allergyInstruction = $this->allergyManager->buildAllergyInstruction($allergies);
 
         $systemPrompt = $isIngredientMode
             ? "Generate exactly one {$mealLabel} meal using the provided ingredients. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object. The meal must strictly adhere to the following user preferences: Food Preference: {$foodPref}, Diet Preference: {$dietPreference}, Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking Time: {$cookingTime}, Health Goal: {$healthGoal}.{$allergyInstruction}"
@@ -985,77 +412,34 @@ PROMPT;
 
         $userMessage = json_encode($prompt);
         if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
-            $parsedAllergies = $this->parseAllergies($allergies);
+            $parsedAllergies = $this->allergyManager->parseAllergies($allergies);
             if (!empty($parsedAllergies)) {
-                $userMessage .= "\n\nCRITICAL SAFETY RULE: The user is severely allergic to: " . implode(', ', $parsedAllergies) . ". You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items. Double-check the generated meal to ensure absolute compliance.";
+                $derivatives = $this->allergyManager->getAllergyDerivatives($parsedAllergies);
+                $userMessage .= "\n\nCRITICAL SAFETY RULE: The user is severely allergic to: " . implode(', ', $parsedAllergies) . ". You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items (such as: " . implode(', ', $derivatives) . "). Double-check the generated meal to ensure absolute compliance.";
             }
         }
 
-        $response = Http::timeout(90)
-            ->withHeaders([
-                'Authorization' => 'Bearer ' . $apiKey,
-            ])
-            ->post('https://api.openai.com/v1/chat/completions', [
-                'model' => (string) config('app.chat_gpt_model', 'gpt-4o-mini'),
-                'messages' => [
-                    ['role' => 'system', 'content' => $systemPrompt],
-                    ['role' => 'user', 'content' => $userMessage],
-                ],
-                'response_format' => ['type' => 'json_object'],
-            ]);
+        $result = $this->generator->generateMeals($user->id, $systemPrompt, $userMessage, $allergies);
 
-        if (!$response->successful()) {
+        if (!$result['success']) {
             return [
                 'status' => false,
-                'message' => 'Failed to regenerate meal.',
-                'code' => 500,
+                'message' => $result['message'],
+                'code' => $result['code'],
             ];
         }
 
-        $decoded = json_decode((string) data_get($response->json(), 'choices.0.message.content', '{}'), true);
+        $decoded = $result['decoded'];
+        $meals = $result['meals'];
+        $newMeal = $meals[0];
 
-        if (!is_array($decoded) || !isset($decoded['meals'][0])) {
-            return [
-                'status' => false,
-                'message' => 'Invalid AI response.',
-                'code' => 500,
-            ];
-        }
-
-        $newMeal = $decoded['meals'][0];
-
-        // Validate allergies in the generated response
-        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
-            $parsedAllergies = $this->parseAllergies($allergies);
-            $allergyChecks = $this->getAllergyDerivatives($parsedAllergies);
-            $mealText = strtolower(($newMeal['name'] ?? '') . ' ' . implode(' ', $newMeal['ingredients'] ?? []) . ' ' . implode(' ', $newMeal['steps'] ?? []));
-            foreach ($allergyChecks as $allergy) {
-                if (str_contains($mealText, strtolower($allergy))) {
-                    Log::error('AI generated single meal violated allergy constraint', [
-                        'user_id' => $user->id,
-                        'allergy' => $allergy,
-                        'meal_name' => $newMeal['name'] ?? 'Unknown',
-                    ]);
-                    return [
-                        'status' => false,
-                        'message' => "AI generated meal contains allergic ingredient or derivative: {$allergy}. Please try generating again.",
-                        'code' => 422,
-                    ];
-                }
-            }
-        }
-        $groceryRequirements = $this->normalizeGroceryRequirements($decoded, [$newMeal]);
+        $groceryRequirements = $this->normalizer->normalizeGroceryRequirements($decoded, [$newMeal]);
 
         // Deactivate ALL active meals of the same type on the same date for this user.
         // This ensures only the new meal is active for that type/date combination.
-        DailyDietPlans::query()
-            ->where('user_id', $user->id)
-            ->where('date', $meal->date)
-            ->where('meal_type', $mealType)
-            ->where('is_active', true)
-            ->update(['is_active' => false]);
+        $this->repository->deactivateActivePlans($user->id, $meal->date, $mealType);
 
-        $saved = DailyDietPlans::create([
+        $saved = $this->repository->createPlan([
             'user_id' => $user->id,
             'date' => $meal->date,
             'meal_type' => $mealType,
