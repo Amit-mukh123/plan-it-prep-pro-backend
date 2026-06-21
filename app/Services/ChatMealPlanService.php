@@ -147,8 +147,9 @@ class ChatMealPlanService
             $mealsPerDay
         );
 
+        $allergies = $answers['allergies'] ?? ($configData['allergies'] ?? 'None');
         $preferences = [
-            'allergies' => $answers['allergies'] ?? ($configData['allergies'] ?? 'None'),
+            'allergies' => $allergies,
             'food_preference' => $answers['food_pref'] ?? ($configData['food_pref'] ?? 'None'),
             'diet_preference' => $profile->diet_preference ?? 'None',
             'prep_style' => $answers['prep_style'] ?? ($configData['prep_style'] ?? 'None'),
@@ -174,6 +175,14 @@ class ChatMealPlanService
 
         $model = (string) config('app.chat_gpt_model', 'gpt-4o-mini');
 
+        $userMessage = 'Generate my personalized meal plan from this user payload: ' . json_encode($promptPayload);
+        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
+            $parsedAllergies = $this->parseAllergies($allergies);
+            if (!empty($parsedAllergies)) {
+                $userMessage .= "\n\nCRITICAL SAFETY RULE: The user is severely allergic to: " . implode(', ', $parsedAllergies) . ". You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items. Double-check all generated meal names, ingredients, and steps to ensure absolute compliance.";
+            }
+        }
+
         $response = Http::timeout(90)
             ->withHeaders([
                 'Authorization' => 'Bearer ' . $apiKey,
@@ -184,7 +193,7 @@ class ChatMealPlanService
                     ['role' => 'system', 'content' => $systemPrompt],
                     [
                         'role' => 'user',
-                        'content' => 'Generate my personalized meal plan from this user payload: ' . json_encode($promptPayload),
+                        'content' => $userMessage,
                     ],
                 ],
                 'response_format' => ['type' => 'json_object'],
@@ -236,6 +245,29 @@ class ChatMealPlanService
                 'message' => 'AI response did not contain meals.',
                 'code' => 500,
             ];
+        }
+
+        // Validate allergies in the generated response
+        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
+            $parsedAllergies = $this->parseAllergies($allergies);
+            $allergyChecks = $this->getAllergyDerivatives($parsedAllergies);
+            foreach ($meals as $meal) {
+                $mealText = strtolower(($meal['name'] ?? '') . ' ' . implode(' ', $meal['ingredients'] ?? []) . ' ' . implode(' ', $meal['steps'] ?? []));
+                foreach ($allergyChecks as $allergy) {
+                    if (str_contains($mealText, strtolower($allergy))) {
+                        Log::error('AI generated meal violated allergy constraint', [
+                            'user_id' => $user->id,
+                            'allergy' => $allergy,
+                            'meal_name' => $meal['name'] ?? 'Unknown',
+                        ]);
+                        return [
+                            'status' => false,
+                            'message' => "AI generated meal plan contains allergic ingredient or derivative: {$allergy}. Please try generating again.",
+                            'code' => 422,
+                        ];
+                    }
+                }
+            }
         }
 
         $groceryRequirements = $this->normalizeGroceryRequirements($decoded, $meals);
@@ -484,7 +516,12 @@ class ChatMealPlanService
     }
 
     /**
-     * System prompt with strict response schema.
+     * System prompt with strict response schema (optimized).
+     * 
+     * Prompt Size / Token Estimate comparison:
+     * - Old Prompt size: ~1,775 characters (approx. 335 tokens)
+     * - New Prompt size: ~1,120 characters (approx. 215 tokens)
+     * - Percentage Reduction: ~37%
      */
     private function buildSystemPrompt(
         int $mealsPerDay,
@@ -501,79 +538,134 @@ class ChatMealPlanService
         $cookingTime = $preferences['cooking_time'] ?? 'None';
         $healthGoal = $preferences['health_goal'] ?? 'None';
 
-        $allergyInstruction = '';
-        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
-            $allergyInstruction = "\n- CRITICAL SAFETY RULE: The user has the following allergies: **{$allergies}**. You MUST NOT recommend or include any ingredients, foods, dishes, or products containing or derived from: **{$allergies}**. This allergy constraint has the absolute highest priority. Double-check all ingredients and steps to ensure complete compliance.\n";
-        }
+        $allergyInstruction = $this->buildAllergyInstruction($allergies);
+        $allergyBlock = $allergyInstruction ? "{$allergyInstruction}\n" : '';
 
-        if ($isIngredientMode) {
-            return <<<PROMPT
-Generate a practical 1-day meal plan from profile + config + provided ingredients.
+        $ingredientHeader = $isIngredientMode ? ' + provided ingredients' : '';
 
-Location rules:
-- Use `location_context` to localize cuisine, ingredient availability, and meal style using the provided country, state, and city.
-- If location is incomplete or missing, fall back to regional-neutral assumptions or keep meals broadly regional-safe.
-
-You MUST prioritize the provided ingredients and suggest meals that can be made using them.
-Also identify additional missing ingredients needed to complete cooking.
-
-Strict Diet & Calorie Constraints:
-$allergyInstruction- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
-- The total calories of all generated meals combined MUST sum up exactly to $calorieTarget kcal (tolerance: ±10 kcal).
-- Distribute the calories logically across the $mealsPerDay meals (e.g. Breakfast, Lunch, Dinner, Snack).
-- Each meal object's "calories" key must be a valid integer.
-- The meals must strictly follow the following user preferences:
-    - Diet/Food Preference: $foodPref (Diet preference: $dietPref)
-    - Prep Style: $prepStyle
-    - Kitchen Appliances: $appliances
-    - Cooking Time: $cookingTime
-    - Health Goal: $healthGoal
-
-Output JSON only (no markdown/text) with exactly these top keys:
-1) meals: array of meal objects with keys
-id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags (array of strings), ingredients (array of strings), steps (array of strings).
-2) groceryRequirements: array of objects with keys item, quantity, category.
-
-Requirements:
-- You MUST include exactly $mealsPerDay meals in the meals array.
-- Meals should clearly reflect usage of provided ingredients when possible.
-- groceryRequirements must contain additional/missing ingredients needed to cook the selected meals.
-- Do not include ingredients that are already sufficiently available in provided ingredients.
-- Use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).
-- Keep meals realistic for home cooking and nutritionally aligned to goal.
-PROMPT;
-        }
+        $modeSpecificRules = $isIngredientMode
+            ? "- Prioritize provided ingredients; suggest meals that can be made using them.\n- groceryRequirements must contain additional/missing ingredients needed; do not include ingredients already available.\n- Use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments)."
+            : "- Main meals should usually have 5+ ingredients and clear steps.\n- groceryRequirements must be consolidated for the day, include oils/spices/sauces, merge duplicates, and use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).";
 
         return <<<PROMPT
-Generate a practical 1-day meal plan from profile + config.
+{$allergyBlock}Generate a 1-day meal plan from profile + config{$ingredientHeader}.
 
-Location rules:
-- Use `location_context` to localize cuisine, ingredient availability, and meal style using the provided country, state, and city.
-- If location is incomplete or missing, fall back to regional-neutral assumptions or keep meals broadly regional-safe.
+Localize cuisine/style via `location_context` (country, state, city) if available, else keep regional-safe.
 
-Strict Diet & Calorie Constraints:
-$allergyInstruction- You MUST generate exactly $mealsPerDay meals for the day. Do not generate 3 meals if the meal count preference is $mealsPerDay.
-- The total calories of all generated meals combined MUST sum up exactly to $calorieTarget kcal (tolerance: ±10 kcal).
-- Distribute the calories logically across the $mealsPerDay meals (e.g. Breakfast, Lunch, Dinner, Snack).
-- Each meal object's "calories" key must be a valid integer.
-- The meals must strictly follow the following user preferences:
-    - Diet/Food Preference: $foodPref (Diet preference: $dietPref)
-    - Prep Style: $prepStyle
-    - Kitchen Appliances: $appliances
-    - Cooking Time: $cookingTime
-    - Health Goal: $healthGoal
+Constraints:
+- Target: Exactly {$mealsPerDay} meals.
+- Daily calories: Combined sum MUST equal {$calorieTarget} kcal (tolerance: ±10).
+- Calories: Distribute logically (e.g. Breakfast, Lunch, Dinner, Snack) with integer value.
+- Preferences: Diet/Food: {$foodPref} (Diet: {$dietPref}), Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking: {$cookingTime}, Goal: {$healthGoal}.
 
-Output JSON only (no markdown/text) with exactly these top keys:
-1) meals: array of meal objects with keys
-id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags (array of strings), ingredients (array of strings), steps (array of strings).
-2) groceryRequirements: array of objects with keys item, quantity, category.
+Output JSON only (no markdown/text) with exactly these keys:
+1) meals: array of meal objects with keys: id, mealType, time, name, emoji, bgColor, calories, protein, carbs, fat, prepTime, tags (array of strings), ingredients (array of strings), steps (array of strings).
+2) groceryRequirements: array of objects with keys: item, quantity, category.
 
-Requirements:
-- You MUST include exactly $mealsPerDay meals in the meals array.
-- Main meals should usually have 5+ ingredients and clear steps.
-- groceryRequirements must be consolidated for the day, include oils/spices/sauces, merge duplicates, and use categories (Vegetables/Fruits/Grains/Protein/Dairy/Spices/Pantry/Condiments).
+Rules:
+- Meals count in array: exactly {$mealsPerDay}.
+{$modeSpecificRules}
 - Keep meals realistic for home cooking and nutritionally aligned to goal.
 PROMPT;
+    }
+
+    /**
+     * Parse and format the allergy string into a highly explicit bulleted exclusion list for the system prompt.
+     */
+    private function buildAllergyInstruction(?string $allergies): string
+    {
+        if (blank($allergies) || strtolower(trim($allergies)) === 'none') {
+            return '';
+        }
+
+        $parsed = $this->parseAllergies($allergies);
+        if (empty($parsed)) {
+            return '';
+        }
+
+        $bulletList = '';
+        foreach ($parsed as $item) {
+            $bulletList .= "\n  * {$item}";
+        }
+
+        return "\n- CRITICAL SAFETY RULE: The user is severely allergic to the following items:{$bulletList}\n  You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items (e.g. if allergic to egg, do not recommend omelettes or scramble). This allergy constraint has the absolute highest priority. Double-check all ingredients, steps, and meal names to ensure complete safety and compliance.\n";
+    }
+
+    /**
+     * Helper to decompose comma and space separated allergy inputs into clean distinct keywords/phrases.
+     */
+    private function parseAllergies(string $allergies): array
+    {
+        $terms = [];
+        $segments = explode(',', $allergies);
+        foreach ($segments as $segment) {
+            $segment = trim($segment);
+            if ($segment === '') {
+                continue;
+            }
+            $terms[] = $segment;
+            
+            $words = preg_split('/\s+/', $segment);
+            if (count($words) > 1) {
+                foreach ($words as $word) {
+                    $word = trim($word);
+                    if ($word !== '') {
+                        $terms[] = $word;
+                    }
+                }
+            }
+        }
+        
+        $ignoredWords = ['and', 'or', 'none', 'no', 'free', 'allergy', 'allergies'];
+        $uniqueTerms = [];
+        foreach ($terms as $term) {
+            $lower = strtolower($term);
+            if (in_array($lower, $ignoredWords, true)) {
+                continue;
+            }
+            $uniqueTerms[$lower] = $term;
+        }
+        
+        return array_values($uniqueTerms);
+    }
+
+    /**
+     * Map allergy keywords to common synonyms, products, or derivatives.
+     */
+    private function getAllergyDerivatives(array $allergies): array
+    {
+        $derivatives = [];
+        $map = [
+            'egg' => ['egg', 'eggs', 'omelette', 'omelet', 'scramble', 'mayo', 'mayonnaise'],
+            'chicken' => ['chicken', 'poultry'],
+            'mutton' => ['mutton', 'lamb', 'goat'],
+            'milk' => ['milk', 'cheese', 'butter', 'yogurt', 'curd', 'paneer', 'cream', 'dairy', 'whey'],
+            'dairy' => ['milk', 'cheese', 'butter', 'yogurt', 'curd', 'paneer', 'cream', 'dairy', 'whey'],
+            'wheat' => ['wheat', 'gluten', 'flour', 'bread', 'pasta', 'semolina'],
+            'gluten' => ['wheat', 'gluten', 'flour', 'bread', 'pasta', 'semolina'],
+            'fish' => ['fish', 'salmon', 'tuna', 'cod', 'seafood'],
+            'seafood' => ['fish', 'salmon', 'tuna', 'cod', 'shrimp', 'prawn', 'lobster', 'crab', 'seafood'],
+            'peanut' => ['peanut', 'peanuts'],
+            'nut' => ['nut', 'nuts', 'almond', 'walnut', 'cashew', 'hazelnut', 'pistachio'],
+            'nuts' => ['nut', 'nuts', 'almond', 'walnut', 'cashew', 'hazelnut', 'pistachio'],
+            'soy' => ['soy', 'soya', 'tofu', 'tempeh'],
+            'beef' => ['beef', 'steak'],
+            'pork' => ['pork', 'bacon', 'ham'],
+        ];
+
+        foreach ($allergies as $allergy) {
+            $lowerAllergy = strtolower($allergy);
+            $derivatives[] = $lowerAllergy;
+            
+            // Check if we have mapped derivatives
+            foreach ($map as $key => $values) {
+                if (str_contains($lowerAllergy, $key) || str_contains($key, $lowerAllergy)) {
+                    $derivatives = array_merge($derivatives, $values);
+                }
+            }
+        }
+
+        return array_values(array_unique($derivatives));
     }
 
     /**
@@ -885,14 +977,19 @@ PROMPT;
             ],
         ];
 
-        $allergyInstruction = '';
-        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
-            $allergyInstruction = " CRITICAL SAFETY RULE: The user has the following allergies: {$allergies}. You MUST NOT recommend or include any ingredients, foods, dishes, or products containing or derived from: {$allergies}. This allergy constraint has the absolute highest priority. Double-check all ingredients and steps to ensure complete compliance.";
-        }
+        $allergyInstruction = $this->buildAllergyInstruction($allergies);
 
         $systemPrompt = $isIngredientMode
             ? "Generate exactly one {$mealLabel} meal using the provided ingredients. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object. The meal must strictly adhere to the following user preferences: Food Preference: {$foodPref}, Diet Preference: {$dietPreference}, Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking Time: {$cookingTime}, Health Goal: {$healthGoal}.{$allergyInstruction}"
             : "Generate exactly one {$mealLabel} meal. Return JSON only with keys: meals and groceryRequirements. The meals array must contain exactly one meal object. The meal must strictly adhere to the following user preferences: Food Preference: {$foodPref}, Diet Preference: {$dietPreference}, Prep Style: {$prepStyle}, Appliances: {$appliances}, Cooking Time: {$cookingTime}, Health Goal: {$healthGoal}.{$allergyInstruction}";
+
+        $userMessage = json_encode($prompt);
+        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
+            $parsedAllergies = $this->parseAllergies($allergies);
+            if (!empty($parsedAllergies)) {
+                $userMessage .= "\n\nCRITICAL SAFETY RULE: The user is severely allergic to: " . implode(', ', $parsedAllergies) . ". You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items. Double-check the generated meal to ensure absolute compliance.";
+            }
+        }
 
         $response = Http::timeout(90)
             ->withHeaders([
@@ -902,7 +999,7 @@ PROMPT;
                 'model' => (string) config('app.chat_gpt_model', 'gpt-4o-mini'),
                 'messages' => [
                     ['role' => 'system', 'content' => $systemPrompt],
-                    ['role' => 'user', 'content' => json_encode($prompt)],
+                    ['role' => 'user', 'content' => $userMessage],
                 ],
                 'response_format' => ['type' => 'json_object'],
             ]);
@@ -926,6 +1023,27 @@ PROMPT;
         }
 
         $newMeal = $decoded['meals'][0];
+
+        // Validate allergies in the generated response
+        if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
+            $parsedAllergies = $this->parseAllergies($allergies);
+            $allergyChecks = $this->getAllergyDerivatives($parsedAllergies);
+            $mealText = strtolower(($newMeal['name'] ?? '') . ' ' . implode(' ', $newMeal['ingredients'] ?? []) . ' ' . implode(' ', $newMeal['steps'] ?? []));
+            foreach ($allergyChecks as $allergy) {
+                if (str_contains($mealText, strtolower($allergy))) {
+                    Log::error('AI generated single meal violated allergy constraint', [
+                        'user_id' => $user->id,
+                        'allergy' => $allergy,
+                        'meal_name' => $newMeal['name'] ?? 'Unknown',
+                    ]);
+                    return [
+                        'status' => false,
+                        'message' => "AI generated meal contains allergic ingredient or derivative: {$allergy}. Please try generating again.",
+                        'code' => 422,
+                    ];
+                }
+            }
+        }
         $groceryRequirements = $this->normalizeGroceryRequirements($decoded, [$newMeal]);
 
         // Deactivate ALL active meals of the same type on the same date for this user.
