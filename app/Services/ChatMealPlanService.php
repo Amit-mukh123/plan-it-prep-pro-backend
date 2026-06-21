@@ -147,8 +147,9 @@ class ChatMealPlanService
             $mealsPerDay
         );
 
+        $allergies = $answers['allergies'] ?? ($configData['allergies'] ?? 'None');
         $preferences = [
-            'allergies' => $answers['allergies'] ?? ($configData['allergies'] ?? 'None'),
+            'allergies' => $allergies,
             'food_preference' => $answers['food_pref'] ?? ($configData['food_pref'] ?? 'None'),
             'diet_preference' => $profile->diet_preference ?? 'None',
             'prep_style' => $answers['prep_style'] ?? ($configData['prep_style'] ?? 'None'),
@@ -249,9 +250,10 @@ class ChatMealPlanService
         // Validate allergies in the generated response
         if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
             $parsedAllergies = $this->parseAllergies($allergies);
+            $allergyChecks = $this->getAllergyDerivatives($parsedAllergies);
             foreach ($meals as $meal) {
                 $mealText = strtolower(($meal['name'] ?? '') . ' ' . implode(' ', $meal['ingredients'] ?? []) . ' ' . implode(' ', $meal['steps'] ?? []));
-                foreach ($parsedAllergies as $allergy) {
+                foreach ($allergyChecks as $allergy) {
                     if (str_contains($mealText, strtolower($allergy))) {
                         Log::error('AI generated meal violated allergy constraint', [
                             'user_id' => $user->id,
@@ -260,7 +262,7 @@ class ChatMealPlanService
                         ]);
                         return [
                             'status' => false,
-                            'message' => "AI generated meal plan contains allergic ingredient: {$allergy}. Please try generating again.",
+                            'message' => "AI generated meal plan contains allergic ingredient or derivative: {$allergy}. Please try generating again.",
                             'code' => 422,
                         ];
                     }
@@ -586,7 +588,7 @@ PROMPT;
             $bulletList .= "\n  * {$item}";
         }
 
-        return "\n- CRITICAL SAFETY RULE: The user is severely allergic to the following items:{$bulletList}\n  You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items. This allergy constraint has the absolute highest priority. Double-check all ingredients, steps, and meal names to ensure complete safety and compliance.\n";
+        return "\n- CRITICAL SAFETY RULE: The user is severely allergic to the following items:{$bulletList}\n  You MUST NOT recommend, list, or include any ingredients, foods, dishes, or products containing, derived from, or associated with any of these items (e.g. if allergic to egg, do not recommend omelettes or scramble). This allergy constraint has the absolute highest priority. Double-check all ingredients, steps, and meal names to ensure complete safety and compliance.\n";
     }
 
     /**
@@ -625,6 +627,45 @@ PROMPT;
         }
         
         return array_values($uniqueTerms);
+    }
+
+    /**
+     * Map allergy keywords to common synonyms, products, or derivatives.
+     */
+    private function getAllergyDerivatives(array $allergies): array
+    {
+        $derivatives = [];
+        $map = [
+            'egg' => ['egg', 'eggs', 'omelette', 'omelet', 'scramble', 'mayo', 'mayonnaise'],
+            'chicken' => ['chicken', 'poultry'],
+            'mutton' => ['mutton', 'lamb', 'goat'],
+            'milk' => ['milk', 'cheese', 'butter', 'yogurt', 'curd', 'paneer', 'cream', 'dairy', 'whey'],
+            'dairy' => ['milk', 'cheese', 'butter', 'yogurt', 'curd', 'paneer', 'cream', 'dairy', 'whey'],
+            'wheat' => ['wheat', 'gluten', 'flour', 'bread', 'pasta', 'semolina'],
+            'gluten' => ['wheat', 'gluten', 'flour', 'bread', 'pasta', 'semolina'],
+            'fish' => ['fish', 'salmon', 'tuna', 'cod', 'seafood'],
+            'seafood' => ['fish', 'salmon', 'tuna', 'cod', 'shrimp', 'prawn', 'lobster', 'crab', 'seafood'],
+            'peanut' => ['peanut', 'peanuts'],
+            'nut' => ['nut', 'nuts', 'almond', 'walnut', 'cashew', 'hazelnut', 'pistachio'],
+            'nuts' => ['nut', 'nuts', 'almond', 'walnut', 'cashew', 'hazelnut', 'pistachio'],
+            'soy' => ['soy', 'soya', 'tofu', 'tempeh'],
+            'beef' => ['beef', 'steak'],
+            'pork' => ['pork', 'bacon', 'ham'],
+        ];
+
+        foreach ($allergies as $allergy) {
+            $lowerAllergy = strtolower($allergy);
+            $derivatives[] = $lowerAllergy;
+            
+            // Check if we have mapped derivatives
+            foreach ($map as $key => $values) {
+                if (str_contains($lowerAllergy, $key) || str_contains($key, $lowerAllergy)) {
+                    $derivatives = array_merge($derivatives, $values);
+                }
+            }
+        }
+
+        return array_values(array_unique($derivatives));
     }
 
     /**
@@ -986,8 +1027,9 @@ PROMPT;
         // Validate allergies in the generated response
         if (filled($allergies) && strtolower(trim($allergies)) !== 'none') {
             $parsedAllergies = $this->parseAllergies($allergies);
+            $allergyChecks = $this->getAllergyDerivatives($parsedAllergies);
             $mealText = strtolower(($newMeal['name'] ?? '') . ' ' . implode(' ', $newMeal['ingredients'] ?? []) . ' ' . implode(' ', $newMeal['steps'] ?? []));
-            foreach ($parsedAllergies as $allergy) {
+            foreach ($allergyChecks as $allergy) {
                 if (str_contains($mealText, strtolower($allergy))) {
                     Log::error('AI generated single meal violated allergy constraint', [
                         'user_id' => $user->id,
@@ -996,7 +1038,7 @@ PROMPT;
                     ]);
                     return [
                         'status' => false,
-                        'message' => "AI generated meal contains allergic ingredient: {$allergy}. Please try generating again.",
+                        'message' => "AI generated meal contains allergic ingredient or derivative: {$allergy}. Please try generating again.",
                         'code' => 422,
                     ];
                 }
