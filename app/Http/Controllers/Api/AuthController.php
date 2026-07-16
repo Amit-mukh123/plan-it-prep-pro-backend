@@ -371,7 +371,10 @@ class AuthController extends Controller
                     'status'        => true,
                     'access_token'  => $accessToken,
                     'refresh_token' => $refreshToken,
-                    'user'          => $user
+                    'user'          => [
+                        'phone_number' => $user->phone_number,
+                        'email'        => $user->email,
+                    ]
                 ], 200);
             });
             
