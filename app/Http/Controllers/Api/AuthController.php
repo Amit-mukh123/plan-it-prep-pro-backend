@@ -345,6 +345,17 @@ class AuthController extends Controller
     }
 
     // ==============================
+    // 6. ME (Authenticated User Details)
+    // ==============================
+    public function me(Request $request)
+    {
+        return response()->json([
+            'status' => true,
+            'user'   => $request->user()
+        ], 200);
+    }
+
+    // ==============================
     // SESSION GENERATION
     // ==============================
     private function generateSession($user, $request)

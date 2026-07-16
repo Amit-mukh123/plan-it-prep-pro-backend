@@ -83,6 +83,8 @@ Route::middleware([RequestLoggingMiddleware::class])->group(function () {
                 ]);
             });
 
+            Route::get('/me', [AuthController::class, 'me']);
+
             Route::post('/logout', [AuthController::class, 'logout']);
 
             Route::post('/user-config-store', [UserConfigController::class, 'store']);
