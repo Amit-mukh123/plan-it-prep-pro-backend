@@ -65,6 +65,13 @@ class UserSummaryController extends Controller
                 ? round($caloriesDone / $caloriesTotal, 2)
                 : 0;
 
+            $configData = is_array($config?->data) ? $config->data : [];
+            $configAnswers = is_array($configData['answers'] ?? null) ? $configData['answers'] : [];
+
+            $height = $configAnswers['height_cm'] ?? ($configAnswers['height'] ?? ($configData['height_cm'] ?? ($configData['height'] ?? null)));
+            $weight = $configAnswers['weight_kg'] ?? ($configAnswers['weight'] ?? ($configData['weight_kg'] ?? ($configData['weight'] ?? null)));
+            $targetWeight = $configAnswers['target_weight_kg'] ?? ($configAnswers['target_weight'] ?? ($configData['target_weight_kg'] ?? ($configData['target_weight'] ?? null)));
+
             // ─── FINAL RESPONSE ─────────────────────────
             return response()->json([
                 'status' => true,
@@ -83,9 +90,9 @@ class UserSummaryController extends Controller
                     "name" => $name,
                     "age" => $profile->age ?? null,
                     "gender" => $profile->gender ?? null,
-                    "height" => $profile->height_cm ?? null,
-                    "weight" => $profile->weight_kg ?? null,
-                    "target_weight" => $profile->target_weight_kg ?? null,
+                    "height" => $height,
+                    "weight" => $weight,
+                    "target_weight" => $targetWeight,
                     "dietType" => $profile->diet_preference ?? null,
                     "avatar" => $profile->avatar_url ?? null,
                     

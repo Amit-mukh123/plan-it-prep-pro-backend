@@ -17,9 +17,6 @@ class UserProfile extends Model
         'full_name',
         'age',
         'gender',
-        'height_cm',
-        'weight_kg',
-        'target_weight_kg',
         'diet_preference',
         'avatar_url',
         'created_by',
@@ -27,9 +24,6 @@ class UserProfile extends Model
     ];
 
     protected $casts = [
-        'height_cm' => 'float',
-        'weight_kg' => 'float',
-        'target_weight_kg' => 'float',
         'age' => 'integer'
     ];
 

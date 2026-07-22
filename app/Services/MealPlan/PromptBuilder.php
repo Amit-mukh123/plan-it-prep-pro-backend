@@ -41,6 +41,10 @@ class PromptBuilder
         $targetCalorieString = $answers['target_calorie'] ?? ($configData['target_calorie'] ?? '2000 kcal');
         $healthGoal = $answers['health_goal'] ?? ($configData['health_goal'] ?? 'None');
 
+        $heightCm = $answers['height_cm'] ?? ($answers['height'] ?? ($configData['height_cm'] ?? ($configData['height'] ?? null)));
+        $weightKg = $answers['weight_kg'] ?? ($answers['weight'] ?? ($configData['weight_kg'] ?? ($configData['weight'] ?? null)));
+        $targetWeightKg = $answers['target_weight_kg'] ?? ($answers['target_weight'] ?? ($configData['target_weight_kg'] ?? ($configData['target_weight'] ?? null)));
+
         return [
             'date' => $planDate,
             'ingredient_context' => [
@@ -61,9 +65,9 @@ class PromptBuilder
                 'full_name' => $profile->full_name,
                 'gender' => $profile->gender,
                 'age' => $profile->age,
-                'height_cm' => $profile->height_cm,
-                'weight_kg' => $profile->weight_kg,
-                'target_weight_kg' => $profile->target_weight_kg,
+                'height_cm' => $heightCm,
+                'weight_kg' => $weightKg,
+                'target_weight_kg' => $targetWeightKg,
                 'diet_preference' => $dietPreference,
             ],
             'config' => [
