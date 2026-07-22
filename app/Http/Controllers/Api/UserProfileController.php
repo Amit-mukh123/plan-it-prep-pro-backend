@@ -28,9 +28,9 @@ class UserProfileController extends Controller
                 'data.full_name' => 'required|string|max:120',
                 'data.gender' => 'required|string',
                 'data.age' => 'required|integer|min:1|max:120',
-                'data.height' => 'required|numeric',
-                'data.weight' => 'required|numeric',
-                'data.target_weight' => 'required|numeric',
+                // 'data.height' => 'required|numeric',
+                // 'data.weight' => 'required|numeric',
+                // 'data.target_weight' => 'required|numeric',
                 'data.diet' => 'required|string'
             ]);
 
@@ -44,9 +44,9 @@ class UserProfileController extends Controller
                     'full_name' => $data['full_name'],
                     'gender' => strtolower($data['gender']), // match enum
                     'age' => $data['age'],
-                    'height_cm' => $data['height'],
-                    'weight_kg' => $data['weight'],
-                    'target_weight_kg' => $data['target_weight'],
+                    'height_cm' => null,
+                    'weight_kg' => null,
+                    'target_weight_kg' => null,
                     'diet_preference' => strtolower($data['diet']),
                     'updated_by' => $userId,
                     'created_by' => $userId
