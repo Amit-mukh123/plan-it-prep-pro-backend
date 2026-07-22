@@ -192,15 +192,19 @@ class BatchMealController extends Controller
 
         $answers = $configData['answers'] ?? [];
 
+        $heightCm = $answers['height_cm'] ?? ($answers['height'] ?? ($configData['height_cm'] ?? ($configData['height'] ?? null)));
+        $weightKg = $answers['weight_kg'] ?? ($answers['weight'] ?? ($configData['weight_kg'] ?? ($configData['weight'] ?? null)));
+        $targetWeightKg = $answers['target_weight_kg'] ?? ($answers['target_weight'] ?? ($configData['target_weight_kg'] ?? ($configData['target_weight'] ?? null)));
+
         return [
             'user_id' => $user->id,
             'profile' => [
                 'full_name' => $profile->full_name,
                 'age' => $profile->age,
                 'gender' => $profile->gender,
-                'height_cm' => $profile->height_cm,
-                'weight_kg' => $profile->weight_kg,
-                'target_weight_kg' => $profile->target_weight_kg,
+                'height_cm' => $heightCm,
+                'weight_kg' => $weightKg,
+                'target_weight_kg' => $targetWeightKg,
                 'diet_preference' => $profile->diet_preference,
             ],
             'config' => [
