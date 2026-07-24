@@ -85,7 +85,11 @@ Route::middleware([RequestLoggingMiddleware::class])->group(function () {
 
             Route::get('/me', [AuthController::class, 'me']);
 
-            Route::post('/logout', [AuthController::class, 'logout']);
+            Route::post('/logout',     [AuthController::class, 'logout']);
+            Route::post('/logout-all', [AuthController::class, 'logoutAll']);
+
+            Route::get('/sessions',                [AuthController::class, 'getActiveSessions']);
+            Route::delete('/sessions/{id}/revoke', [AuthController::class, 'revokeSession']);
 
             Route::post('/user-config-store', [UserConfigController::class, 'store']);
             Route::get('/user-config-show',   [UserConfigController::class, 'show']);
