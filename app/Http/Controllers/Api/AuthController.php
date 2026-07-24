@@ -362,77 +362,274 @@ class AuthController extends Controller
     {
         try {
             $response = DB::transaction(function () use ($user, $request) {
-                // Deactivate old sessions if your logic requires single-device login
-                // UserSession::where('user_id', $user->id)->update(['is_active' => false]);
-
-                $accessToken = $user->createToken('access_token')->plainTextToken;
+                $devicePlatform = $request->header('X-Device-Platform') 
+                    ?? $request->input('device_platform');
+                $deviceName = $request->header('X-Device-Name') 
+                    ?? $request->input('device_name');
 
                 $refreshToken = hash('sha256', Str::random(60));
 
-                UserSession::create([
-                    'user_id'       => $user->id,
-                    'refresh_token' => $refreshToken,
-                    'ip_address'    => $request->ip(),
-                    'user_agent'    => $request->userAgent(),
-                    'expires_at'    => now()->addDays(30),
-                    'is_active'     => true
+                $session = UserSession::create([
+                    'user_id'         => $user->id,
+                    'refresh_token'   => $refreshToken,
+                    'device_platform' => $devicePlatform,
+                    'device_name'     => $deviceName,
+                    'ip_address'      => $request->ip(),
+                    'user_agent'      => $request->userAgent(),
+                    'expires_at'      => now()->addDays(30),
+                    'last_used_at'    => now(),
+                    'is_active'       => true
                 ]);
+
+                // Bind Sanctum access token directly to the specific UserSession ID
+                $accessToken = $user->createToken('session:' . $session->id)->plainTextToken;
 
                 return response()->json([
                     'status'        => true,
                     'access_token'  => $accessToken,
                     'refresh_token' => $refreshToken,
+                    'session_id'    => $session->id,
                     'user'          => [
+                        'id'           => $user->id,
                         'phone_number' => $user->phone_number,
                         'email'        => $user->email,
                     ]
                 ], 200);
             });
-            
 
             // Keep login-attempt logging outside DB transaction.
-            // In PostgreSQL, a failed statement inside a transaction marks it aborted.
             $this->logAttempt($request, $user->id, true, null);
 
             return $response;
         } catch (\Exception $e) {
-            Log::error('Session Generation Error: ' . $e->getMessage());
+            Log::error('Session Generation Error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
             return response()->json(['status' => false, 'msg' => 'Token generation failed'], 500);
         }
     }
 
     // ==============================
-    // REFRESH TOKEN
+    // REFRESH TOKEN (Production Grade Token Rotation)
     // ==============================
     public function refreshToken(Request $request)
     {
-        $validator = Validator::make($request->all(), [
-            'refresh_token' => 'required'
-        ]);
+        $refreshTokenStr = $request->input('refresh_token') ?? $request->header('X-Refresh-Token');
 
-        if ($validator->fails()) {
-            return response()->json(['status' => false, 'msg' => 'Refresh token required'], 422);
+        if (!$refreshTokenStr) {
+            return response()->json(['status' => false, 'msg' => 'Refresh token is required'], 422);
         }
 
-        $session = UserSession::where('refresh_token', $request->refresh_token)
-            ->where('is_active', true)
-            ->where('expires_at', '>', now())
-            ->first();
+        $session = UserSession::where('refresh_token', $refreshTokenStr)->first();
 
         if (!$session) {
-            return response()->json(['status' => false, 'msg' => 'Invalid or expired session'], 401);
+            return response()->json(['status' => false, 'msg' => 'Invalid session or refresh token'], 401);
+        }
+
+        // Security check: Token Reuse Detection
+        if (!$session->is_active || !is_null($session->revoked_at)) {
+            Log::warning('Refresh token reuse attempt detected', [
+                'session_id' => $session->id,
+                'user_id'    => $session->user_id,
+                'ip'         => $request->ip(),
+                'user_agent' => $request->userAgent()
+            ]);
+
+            // Revoke all active sessions for user to protect account against compromised token reuse
+            UserSession::where('user_id', $session->user_id)
+                ->where('is_active', true)
+                ->update([
+                    'is_active'  => false,
+                    'revoked_at' => now(),
+                ]);
+
+            return response()->json(['status' => false, 'msg' => 'Session has been revoked due to suspicious activity'], 401);
+        }
+
+        // Expiration check
+        if ($session->expires_at && $session->expires_at->isPast()) {
+            $session->update([
+                'is_active'  => false,
+                'revoked_at' => now(),
+            ]);
+
+            return response()->json(['status' => false, 'msg' => 'Session has expired'], 401);
         }
 
         $user = User::find($session->user_id);
-        
-        if (!$user) {
-            return response()->json(['status' => false, 'msg' => 'User no longer exists'], 404);
+
+        if (!$user || (isset($user->is_active) && !$user->is_active)) {
+            return response()->json(['status' => false, 'msg' => 'User account is disabled or no longer exists'], 401);
         }
 
-        // Revoke the old session used to refresh
-        $session->update(['is_active' => false]);
+        // Token Rotation: Deactivate current session token
+        $session->update([
+            'is_active'    => false,
+            'revoked_at'   => now(),
+            'last_used_at' => now(),
+        ]);
 
         return $this->generateSession($user, $request);
+    }
+
+    // ==============================
+    // LOGOUT (Device / Session Deactivation)
+    // ==============================
+    public function logout(Request $request)
+    {
+        try {
+            $user = $request->user();
+
+            if (!$user) {
+                return response()->json(['status' => false, 'msg' => 'Unauthenticated'], 401);
+            }
+
+            $currentToken = $user->currentAccessToken();
+            $linkedSessionId = null;
+
+            // Extract linked session ID from token name if available
+            if ($currentToken && Str::startsWith($currentToken->name, 'session:')) {
+                $linkedSessionId = Str::after($currentToken->name, 'session:');
+            }
+
+            // Revoke current Sanctum access token
+            if ($currentToken) {
+                $currentToken->delete();
+            }
+
+            $refreshTokenStr = $request->input('refresh_token') ?? $request->header('X-Refresh-Token');
+            $logoutAll = $request->boolean('logout_all') || $request->boolean('all_devices');
+
+            if ($logoutAll) {
+                // Revoke all Sanctum access tokens
+                $user->tokens()->delete();
+
+                // Deactivate all active sessions for user
+                UserSession::where('user_id', $user->id)
+                    ->where('is_active', true)
+                    ->update([
+                        'is_active'  => false,
+                        'revoked_at' => now(),
+                    ]);
+
+                return response()->json([
+                    'status' => true,
+                    'msg'    => 'Successfully logged out from all devices'
+                ], 200);
+            }
+
+            // Deactivate specific refresh token session
+            if ($refreshTokenStr) {
+                UserSession::where('user_id', $user->id)
+                    ->where('refresh_token', $refreshTokenStr)
+                    ->update([
+                        'is_active'  => false,
+                        'revoked_at' => now(),
+                    ]);
+            } elseif ($linkedSessionId) {
+                // Automatically deactivate the session linked directly to this Bearer token
+                UserSession::where('user_id', $user->id)
+                    ->where('id', $linkedSessionId)
+                    ->update([
+                        'is_active'  => false,
+                        'revoked_at' => now(),
+                    ]);
+            } else {
+                // Fallback: deactivate active session matching IP/User-Agent or latest active session
+                $sessionToRevoke = UserSession::where('user_id', $user->id)
+                    ->where('is_active', true)
+                    ->where('ip_address', $request->ip())
+                    ->latest()
+                    ->first()
+                    ?? UserSession::where('user_id', $user->id)
+                        ->where('is_active', true)
+                        ->latest()
+                        ->first();
+
+                if ($sessionToRevoke) {
+                    $sessionToRevoke->update([
+                        'is_active'  => false,
+                        'revoked_at' => now(),
+                    ]);
+                }
+            }
+
+            return response()->json([
+                'status' => true,
+                'msg'    => 'Successfully logged out'
+            ], 200);
+
+        } catch (\Exception $e) {
+            Log::error('Logout Error: ' . $e->getMessage(), [
+                'trace' => $e->getTraceAsString()
+            ]);
+
+            return response()->json([
+                'status' => false,
+                'msg'    => 'Logout failed'
+            ], 500);
+        }
+    }
+
+    // ==============================
+    // LOGOUT ALL DEVICES
+    // ==============================
+    public function logoutAll(Request $request)
+    {
+        $request->merge(['logout_all' => true]);
+        return $this->logout($request);
+    }
+
+    // ==============================
+    // GET ACTIVE SESSIONS
+    // ==============================
+    public function getActiveSessions(Request $request)
+    {
+        try {
+            $user = $request->user();
+            $sessions = UserSession::where('user_id', $user->id)
+                ->active()
+                ->orderBy('created_at', 'desc')
+                ->get(['id', 'device_platform', 'device_name', 'ip_address', 'user_agent', 'last_used_at', 'created_at']);
+
+            return response()->json([
+                'status'   => true,
+                'sessions' => $sessions
+            ], 200);
+        } catch (\Exception $e) {
+            Log::error('Get Active Sessions Error: ' . $e->getMessage());
+            return response()->json(['status' => false, 'msg' => 'Failed to fetch sessions'], 500);
+        }
+    }
+
+    // ==============================
+    // REVOKE SPECIFIC SESSION
+    // ==============================
+    public function revokeSession(Request $request, $sessionId)
+    {
+        try {
+            $user = $request->user();
+            $session = UserSession::where('user_id', $user->id)
+                ->where('id', $sessionId)
+                ->first();
+
+            if (!$session) {
+                return response()->json(['status' => false, 'msg' => 'Session not found'], 404);
+            }
+
+            $session->update([
+                'is_active'  => false,
+                'revoked_at' => now(),
+            ]);
+
+            return response()->json([
+                'status' => true,
+                'msg'    => 'Session revoked successfully'
+            ], 200);
+        } catch (\Exception $e) {
+            Log::error('Revoke Session Error: ' . $e->getMessage());
+            return response()->json(['status' => false, 'msg' => 'Failed to revoke session'], 500);
+        }
     }
 
     // ==============================
